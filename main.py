@@ -38,6 +38,7 @@ def get_config():
   return task, cfg
 
 if __name__ == '__main__':
+  torch.set_float32_matmul_precision('high')
   task, cfg = get_config()
   device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
   model = get_model(cfg, device, cfg.seed)
