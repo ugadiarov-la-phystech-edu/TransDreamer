@@ -1,3 +1,4 @@
+import comet_ml
 import torch
 import torch.nn as nn
 from torch.utils.tensorboard import SummaryWriter
@@ -99,6 +100,10 @@ def train(model, cfg, device):
     env_step = 0
     global_step = 0
 
+  comet_ml.login()
+  experiment = comet_ml.start()
+  experiment.log_parameters(dict(cfg))
+  experiment.set_name(os.getenv('COMET_EXPERIMENT_NAME', f'{cfg.exp_name}_{cfg.env.name}'))
   writer = SummaryWriter(log_dir=os.path.join(cfg.logdir, cfg.exp_name, cfg.env.name, cfg.run_id), flush_secs=30)
 
   datadir = os.path.join(cfg.data.datadir, cfg.exp_name, cfg.env.name, cfg.run_id, 'train_episodes')
