@@ -98,7 +98,7 @@ class Attention(nn.Module):
         return x
 
 
-class TransformerDreamer(nn.Module):
+class Transformer(nn.Module):
     def __init__(self, cfg):
         super().__init__()
 
