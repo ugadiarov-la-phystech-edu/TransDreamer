@@ -53,7 +53,8 @@ class TransformerWorldModel(nn.Module):
     self.reward_layer = cfg.arch.world_model.reward_layer
     self.pcont_scale = cfg.loss.pcont_scale
     self.kl_scale = cfg.loss.kl_scale
-    self.kl_balance = cfg.loss.kl_balance
+    self.kl_dyn = cfg.loss.kl_dyn
+    self.kl_rep = cfg.loss.kl_rep
     self.free_nats = cfg.loss.free_nats
     self.H = cfg.arch.H
     self.grad_clip = cfg.optimize.grad_clip
@@ -106,16 +107,16 @@ class TransformerWorldModel(nn.Module):
 
     pred_pcont = self.pcont(rnn_feature)  # B, T, 1
     pcont_target = self.discount * (1. - traj['done'][:, 1:].float())  # B, T
-    pcont_loss = -(pred_pcont.log_prob((pcont_target.unsqueeze(2) > 0.5).float())).sum(-1) / seq_len #
+    pcont_loss = -(pred_pcont.log_prob((pcont_target.unsqueeze(2) > 0.5).float())) #
     pcont_loss = self.pcont_scale * pcont_loss.mean()
     discount_acc = ((pred_pcont.mean == pcont_target.unsqueeze(2)).float().squeeze(-1)).sum(-1) / seq_len
     discount_acc = discount_acc.mean()
 
-    image_pred_loss = -(image_pred_pdf.log_prob(obs[:, 1:])).sum(-1).float() / seq_len  # B
+    image_pred_loss = -(image_pred_pdf.log_prob(obs[:, 1:])).float()  # B
     image_pred_loss = image_pred_loss.mean()
     mse_loss = (F.mse_loss(image_pred_pdf.mean, obs[:, 1:], reduction='none').flatten(start_dim=-3).sum(-1)).sum(-1) / seq_len
     mse_loss = mse_loss.mean()
-    reward_pred_loss = -(reward_pred_pdf.log_prob(reward[:, 1:].unsqueeze(2))).sum(-1) / seq_len # B
+    reward_pred_loss = -(reward_pred_pdf.log_prob(reward[:, 1:].unsqueeze(2))) # B
     reward_pred_loss = reward_pred_loss.mean()
     pred_reward = reward_pred_pdf.mean
 
@@ -124,14 +125,15 @@ class TransformerWorldModel(nn.Module):
 
     value_lhs = kl_divergence(post_dist, self.dynamic.get_dist(prior_state, temp, detach=True)) # B, T
     value_rhs = kl_divergence(self.dynamic.get_dist(post_state_trimed, temp, detach=True), prior_dist)
-    value_lhs = value_lhs.sum(-1) / seq_len
-    value_rhs = value_rhs.sum(-1) / seq_len
-    loss_lhs = torch.maximum(value_lhs.mean(), value_lhs.new_ones(value_lhs.mean().shape) * self.free_nats)
-    loss_rhs = torch.maximum(value_rhs.mean(), value_rhs.new_ones(value_rhs.mean().shape) * self.free_nats)
+    value_lhs = value_lhs
+    value_rhs = value_rhs
+    loss_lhs = torch.maximum(value_lhs, value_lhs.new_ones(value_lhs.shape) * self.free_nats)
+    loss_rhs = torch.maximum(value_rhs, value_rhs.new_ones(value_rhs.shape) * self.free_nats)
 
-    kl_loss = (1. - self.kl_balance) * loss_lhs + self.kl_balance * loss_rhs
+    kl_loss = self.kl_rep * loss_lhs + self.kl_dyn * loss_rhs
     kl_scale = self.kl_scale
     kl_loss = kl_scale * kl_loss
+    kl_loss = kl_loss.mean()
 
     model_loss = image_pred_loss + reward_pred_loss + kl_loss + pcont_loss
 

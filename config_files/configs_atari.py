@@ -100,7 +100,8 @@ cfg = CN({
     'pcont_scale': 5.,
     'kl_scale': 0.1,
     'free_nats': 0.,
-    'kl_balance': 0.8,
+    "kl_dyn": 0.8,
+    "kl_rep": 0.2,
   },
 
   'env':{

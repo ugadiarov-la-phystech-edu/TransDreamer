@@ -40,7 +40,8 @@ class TransDreamer(nn.Module):
     self.actor_loss_type = cfg.arch.actor.actor_loss_type
     self.pcont_scale = cfg.loss.pcont_scale
     self.kl_scale = cfg.loss.kl_scale
-    self.kl_balance = cfg.loss.kl_balance
+    self.kl_dyn = cfg.loss.kl_dyn
+    self.kl_rep = cfg.loss.kl_rep
     self.free_nats = cfg.loss.free_nats
     self.H = cfg.arch.H
     self.grad_clip = cfg.optimize.grad_clip

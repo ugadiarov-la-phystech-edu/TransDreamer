@@ -35,7 +35,8 @@ class RSSMWorldModel(nn.Module):
 
     self.pcont_scale = cfg.loss.pcont_scale
     self.kl_scale = cfg.loss.kl_scale
-    self.kl_balance = cfg.loss.kl_balance
+    self.kl_dyn = cfg.loss.kl_dyn
+    self.kl_rep = cfg.loss.kl_rep
     self.free_nats = cfg.loss.free_nats
     self.H = cfg.arch.H
     self.grad_clip = cfg.optimize.grad_clip
@@ -93,8 +94,7 @@ class RSSMWorldModel(nn.Module):
     value_rhs = kl_divergence(self.dynamic.get_dist(post_state, detach=True), prior_dist)
     loss_lhs = torch.maximum(value_lhs.mean(), value_lhs.new_ones(value_lhs.mean().shape) * self.free_nats)
     loss_rhs = torch.maximum(value_rhs.mean(), value_rhs.new_ones(value_rhs.mean().shape) * self.free_nats)
-    mix = 1. - self.kl_balance
-    kl_loss = mix * loss_lhs + (1. - mix) * loss_rhs
+    kl_loss = self.kl_rep * loss_lhs + self.kl_dyn * loss_rhs
     kl_loss = self.kl_scale * kl_loss
 
     model_loss = image_pred_loss + reward_pred_loss + kl_loss

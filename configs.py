@@ -112,8 +112,9 @@ cfg = CN(
             "pcont_scale": 5.0,
             "kl_scale": 0.1,
             "free_nats": 0.0,
-            "kl_balance": 0.8,
             "ent_scale": 1e-3,
+            "kl_dyn": 0.8,
+            "kl_rep": 0.2,
         },
         "env": {
             "action_size": 18,
