@@ -9,6 +9,7 @@ from torch.distributions import kl_divergence, RelaxedOneHotCategorical
 from .distributions import SafeTruncatedNormal, ContDist
 from .utils import Conv2DBlock, ConvTranspose2DBlock, Linear, MLP, GRUCell, LayerNormGRUCell, LayerNormGRUCellV2
 from .transformer import Transformer
+from .dreamerv3_transformer import TransformerDreamer
 from collections import defaultdict
 import numpy as np
 import pdb
@@ -256,6 +257,7 @@ class TransformerDynamic(nn.Module):
     self.img_enc = ImgEncoder(cfg)
 
     weight_init = cfg.arch.world_model.RSSM.weight_init
+    Transformer = TransformerDreamer if cfg.arch.world_model.use_dreamer_transformer else Transformer
     self.cell = Transformer(cfg.arch.world_model.transformer)
 
     if self.stoch_discrete:

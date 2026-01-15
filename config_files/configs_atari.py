@@ -20,6 +20,7 @@ cfg = CN({
       'q_emb_action': False,
       'act_after_emb': True,
       'rec_sigma': .3,
+      'use_dreamer_transformer': False,
       'transformer': {
         'max_time': 2000,
         'num_heads': 8,

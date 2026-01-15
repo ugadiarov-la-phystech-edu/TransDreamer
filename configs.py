@@ -44,6 +44,7 @@ cfg = CN(
                 "temp_decay_steps": 1e6,
                 "input_type": "image",
                 "train_wm_steps": 1,
+                "use_dreamer_transformer": False,
                 "transformer": {
                     "max_time": 2000,
                     "num_heads": 8,
