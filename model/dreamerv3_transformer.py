@@ -107,10 +107,10 @@ class TransformerDreamer(nn.Module):
         self.heads = cfg.num_heads
         self.ffup = cfg.get('ffup', 4)
         self.act_name = cfg.activation
-        self.norm = cfg.get('norm', 'layer')
+        self.norm = 'layer' if cfg.pre_lnorm else 'none'
         self.glu = cfg.get('glu', False)
         self.position_embedding = cfg.get('position_embedding', 'none')
-        self.qknorm = cfg.get('qknorm', 'layer')
+        self.qknorm = 'layer' if cfg.pre_lnorm else 'none'
         self.bias = cfg.get('bias', True)
         self.outscale = cfg.get('outscale', 1.0)
         self.concatenate_over_layers = cfg.deter_type == 'concat_o'
