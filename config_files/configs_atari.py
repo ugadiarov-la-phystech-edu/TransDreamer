@@ -10,6 +10,10 @@ cfg = CN({
   'run_id': 'run_0',
   'model': 'dreamer_transformer',
   'total_steps': 1e7,
+  'slow_target': True,
+  'slow_regularization': 0.0,
+  'slow_update_soft': False,
+  'slow_update_soft_rate': 0.0,
   'arch':{
     'use_pcont': True,
     'mem_size': 100000,
@@ -36,6 +40,7 @@ cfg = CN({
         'pre_lnorm': True,
         'deter_type': 'concat_o',
         'gating': False,
+        'position_embedding': 'none',
       },
       'q_transformer': {
         'max_time': 2000,

@@ -11,7 +11,11 @@ cfg = CN(
         "run_id": "run_0",
         "total_steps": 1e7,
         "model": "dreamer_transformer",
+        "slow_target": True,
+        "slow_regularization": 0.0,
         "slow_update_step": 100,
+        "slow_update_soft": False,
+        "slow_update_soft_rate": 0.0,
         "eval_steps": 100,
         "arch": {
             "local_state": False,
@@ -63,6 +67,7 @@ cfg = CN(
                     "last_ln": False,
                     "enc_pos": False,
                     "warm_up": False,
+                    "position_embedding": "none",
                 },
                 "q_transformer": {
                     "max_time": 2000,

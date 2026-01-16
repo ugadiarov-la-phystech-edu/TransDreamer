@@ -21,7 +21,7 @@ def rope(x, ts=None, inverse=False, maxlen=4096):
     radians = ts[:, :, None] / timescale[None, None, :]  # [B, T, D/2]
     radians = radians[..., None, :].to(x.dtype)  # [B, T, 1, D/2]
     sin, cos = torch.sin(radians), torch.cos(radians)
-    x1, x2 = torch.split(x, 2, dim=-1)  # [B, T, H, D/2]
+    x1, x2 = torch.split(x, x.shape[-1] // 2, dim=-1)  # [B, T, H, D/2]
     res = torch.concatenate([x1 * cos - x2 * sin, x2 * cos + x1 * sin], dim=-1)
     return res
 

@@ -53,6 +53,10 @@ class TransDreamer(nn.Module):
     self.n_sample = cfg.train.n_sample
     self.imag_last_T = cfg.train.imag_last_T
     self.slow_update_step = cfg.slow_update_step
+    self.slow_target = cfg.slow_target
+    self.slow_regularization = cfg.slow_regularization
+    self.slow_update_soft = cfg.slow_update_soft
+    self.slow_update_soft_rate = cfg.slow_update_soft_rate
     self.reward_layer = cfg.arch.world_model.reward_layer
     self.log_grad = cfg.train.log_grad
     self.ent_scale = cfg.loss.ent_scale
@@ -149,7 +153,7 @@ class TransDreamer(nn.Module):
     imagine_feat, imagine_state, imagine_action, \
       imagine_reward, imagine_disc, imagine_idx = self.world_model.imagine_ahead(self.actor, post_state, traj, self.batch_length-1, temp)
 
-    target, weights = self.compute_target(imagine_feat, imagine_reward, imagine_disc) # B*T, H-1, 1
+    target, slowvalue, weights = self.compute_target(imagine_feat, imagine_reward, imagine_disc) # B*T, H-1, 1
 
     slice_idx = -1
 
@@ -180,6 +184,8 @@ class TransDreamer(nn.Module):
     self.value.requires_grad_(True)
     imagine_value_dist = self.value(imagine_feat[:,:slice_idx].detach())
     log_prob = -imagine_value_dist.log_prob(target.detach())
+    if self.slow_regularization > 0:
+        log_prob = log_prob - imagine_value_dist.log_prob(slowvalue.detach()[:, :slice_idx]) * self.slow_regularization
     value_loss = weights[:, :slice_idx] * log_prob.unsqueeze(2)
     value_loss = value_loss.mean()
     imagine_value = imagine_value_dist.mean
@@ -217,15 +223,23 @@ class TransDreamer(nn.Module):
     self.slow_value.eval()
     self.slow_value.requires_grad_(False)
 
-    value = self.slow_value(imag_feat).mean  # B*T, H, 1
+    slowvalue = self.slow_value(imag_feat).mean  # B*T, H, 1
+    mode = self.value.training
+    self.value.eval()
+    with torch.no_grad():
+        value = self.value(imag_feat).mean
+
+    self.value.train(mode)
+
+    target_value = slowvalue if self.slow_target else value
 
     # v_t = R_{t+1} + v_{t+1}
-    target = self.lambda_return(reward[:, 1:], value[:, :-1], discount_arr[:, 1:],
-                                value[:, -1], self.lambda_)
+    target = self.lambda_return(reward[:, 1:], target_value[:, :-1], discount_arr[:, 1:],
+                                target_value[:, -1], self.lambda_)
 
     discount_arr = torch.cat([torch.ones_like(discount_arr[:, :1]), discount_arr[:, :-1]], dim=1)
     weights = torch.cumprod(discount_arr, 1).detach()  # B, T 1
-    return target, weights
+    return target, slowvalue, weights
 
 
   def policy(self, prev_obs, obs, action, gradient_step, temp, state=None, training=True, context_len=49):
@@ -313,7 +327,12 @@ class TransDreamer(nn.Module):
   def update_slow_target(self, global_step):
     with torch.no_grad():
       if self.slow_update % self.slow_update_step == 0:
-        self.slow_value.load_state_dict(self.value.state_dict())
+        if self.slow_update_soft:
+            for value_param, slow_value_param in zip(self.value.parameters(), self.slow_value.parameters()):
+                slow_value_param.data.mul_(1.0 - self.slow_update_soft_rate)
+                slow_value_param.data.add_(value_param.data, alpha=self.slow_update_soft_rate)
+        else:
+            self.slow_value.load_state_dict(self.value.state_dict())
 
       self.slow_update += 1
 
