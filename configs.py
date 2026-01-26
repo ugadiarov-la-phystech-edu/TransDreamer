@@ -125,6 +125,7 @@ cfg = CN(
             "grayscale": True,
             "all_actions": True,
             "time_penalty": 0.0,
+            "size": 84,
         },
         "rl": {
             "discount": 0.999,

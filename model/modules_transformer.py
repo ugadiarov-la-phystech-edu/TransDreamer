@@ -511,12 +511,26 @@ class ImgEncoder(nn.Module):
     self.q_trans = cfg.arch.q_trans
     depth = 48
     c_in = 1 if cfg.env.grayscale else 3
+    self.kernel = 4
+    self.stride = 2
+    self.out_dim = 8 * depth
     self.enc = nn.Sequential(
-      Conv2DBlock(c_in, depth, 4, 2, 0, num_groups=0, bias=True, non_linearity=True, act='elu', weight_init='xavier'),
-      Conv2DBlock(depth, 2*depth, 4, 2, 0, num_groups=0, bias=True, non_linearity=True, act='elu', weight_init='xavier'),
-      Conv2DBlock(2*depth, 4*depth, 4, 2, 0, num_groups=0, bias=True, non_linearity=True, act='elu', weight_init='xavier'),
-      Conv2DBlock(4*depth, 8*depth, 4, 2, 0, num_groups=0, bias=True, non_linearity=not self.q_trans, act='elu', weight_init='xavier'),
+      Conv2DBlock(c_in, depth, self.kernel, self.stride, 0, num_groups=0, bias=True, non_linearity=True, act='elu', weight_init='xavier'),
+      Conv2DBlock(depth, 2*depth, self.kernel, self.stride, 0, num_groups=0, bias=True, non_linearity=True, act='elu', weight_init='xavier'),
+      Conv2DBlock(2*depth, 4*depth, self.kernel, self.stride, 0, num_groups=0, bias=True, non_linearity=True, act='elu', weight_init='xavier'),
+      Conv2DBlock(4*depth, self.out_dim, self.kernel, self.stride, 0, num_groups=0, bias=True, non_linearity=not self.q_trans, act='elu', weight_init='xavier'),
     )
+    self.out_size = self.out(cfg)
+    self.linear = nn.Linear(self.out_dim * self.out_size * self.out_size, 1536)
+
+  def out(self, cfg):
+    n_blocks = len(list(self.enc.children()))
+    size = cfg.env.size
+    out = lambda x: int((x - self.kernel) / self.stride + 1)
+    for _ in range(n_blocks):
+        size = out(size)
+
+    return size
 
   def forward(self, ipts):
     """
@@ -526,6 +540,8 @@ class ImgEncoder(nn.Module):
 
     shapes = ipts.shape
     o = self.enc(ipts.view([-1] + [*shapes[-3:]]))
+    o = o.view((o.shape[0], -1))
+    o = self.linear(o)
     o = o.reshape([*shapes[:-3]] + [1536])
 
     return o

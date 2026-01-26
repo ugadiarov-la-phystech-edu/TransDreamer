@@ -60,6 +60,12 @@ def make_env(cfg, writer, prefix, datadir, store, seed=0):
     env = Crafter(task, (64, 64), seed)
     env = OneHotAction(env)
 
+  elif suite == 'shapes2d':
+    import envs.shapes2d
+    from envs.from_gym import FromGym
+    env = FromGym(task, cfg.env.size, seed=seed)
+    env = OneHotAction(env)
+
   else:
     raise NotImplementedError(suite)
 
