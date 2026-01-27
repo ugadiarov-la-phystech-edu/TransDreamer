@@ -202,7 +202,7 @@ class TransformerWorldModel(nn.Module):
     n_steps = pad_mask.shape[-1] - pad_mask.sum(-1) - 1
     start_index = pad_mask.sum(-1) + (torch.rand_like(n_steps, dtype=torch.float64) * n_steps).floor()
     shift = (pad_mask.shape[-1] - 1 - start_index).long()
-    assert start_index.min().item() > 0
+    assert start_index.max().item() < pad_mask.shape[1] - 1
     assert shift.min().item() > 0
 
     max_context_length = torch.clamp_max(pad_mask.shape[-1] - pad_mask.sum(-1) - shift , self.H - 2)
