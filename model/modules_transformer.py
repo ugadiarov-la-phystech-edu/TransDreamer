@@ -1,3 +1,5 @@
+import math
+
 from torch.distributions.bernoulli import Bernoulli
 from torch.distributions.one_hot_categorical import OneHotCategorical
 from torch.distributions import Independent, Normal, Bernoulli
@@ -99,6 +101,7 @@ class TransformerWorldModel(nn.Module):
       else:
         post_state_trimed[k] = v
 
+    not_pad_mask = 1 - traj['pad_mask'][:, 1:]
     rnn_feature = self.dynamic.get_feature(post_state_trimed, layer=self.reward_layer)
     seq_len = self.H
 
@@ -107,16 +110,16 @@ class TransformerWorldModel(nn.Module):
 
     pred_pcont = self.pcont(rnn_feature)  # B, T, 1
     pcont_target = self.discount * (1. - traj['done'][:, 1:].float())  # B, T
-    pcont_loss = -(pred_pcont.log_prob((pcont_target.unsqueeze(2) > 0.5).float())).sum(-1) / seq_len #
+    pcont_loss = -((pred_pcont.log_prob((pcont_target.unsqueeze(2) > 0.5).float())) * not_pad_mask).sum(-1) / not_pad_mask.sum(-1)
     pcont_loss = self.pcont_scale * pcont_loss.mean()
-    discount_acc = ((pred_pcont.mean == pcont_target.unsqueeze(2)).float().squeeze(-1)).sum(-1) / seq_len
+    discount_acc = ((pred_pcont.mean == pcont_target.unsqueeze(2)).float().squeeze(-1) * not_pad_mask).sum(-1) / not_pad_mask.sum(-1)
     discount_acc = discount_acc.mean()
 
-    image_pred_loss = -(image_pred_pdf.log_prob(obs[:, 1:])).sum(-1).float() / seq_len  # B
+    image_pred_loss = -(image_pred_pdf.log_prob(obs[:, 1:]) * not_pad_mask).sum(-1) / not_pad_mask.sum(-1)
     image_pred_loss = image_pred_loss.mean()
-    mse_loss = (F.mse_loss(image_pred_pdf.mean, obs[:, 1:], reduction='none').flatten(start_dim=-3).sum(-1)).sum(-1) / seq_len
+    mse_loss = (F.mse_loss(image_pred_pdf.mean, obs[:, 1:], reduction='none').flatten(start_dim=-3).sum(-1) * not_pad_mask).sum(-1) / not_pad_mask.sum(-1)
     mse_loss = mse_loss.mean()
-    reward_pred_loss = -(reward_pred_pdf.log_prob(reward[:, 1:].unsqueeze(2))).sum(-1) / seq_len # B
+    reward_pred_loss = -(reward_pred_pdf.log_prob(reward[:, 1:].unsqueeze(2)) * not_pad_mask).sum(-1) / not_pad_mask.sum(-1) # B
     reward_pred_loss = reward_pred_loss.mean()
     pred_reward = reward_pred_pdf.mean
 
@@ -125,8 +128,8 @@ class TransformerWorldModel(nn.Module):
 
     value_lhs = kl_divergence(post_dist, self.dynamic.get_dist(prior_state, temp, detach=True)) # B, T
     value_rhs = kl_divergence(self.dynamic.get_dist(post_state_trimed, temp, detach=True), prior_dist)
-    value_lhs = value_lhs.sum(-1) / seq_len
-    value_rhs = value_rhs.sum(-1) / seq_len
+    value_lhs = (value_lhs * not_pad_mask).sum(-1) / not_pad_mask.sum(-1)
+    value_rhs = (value_rhs * not_pad_mask).sum(-1) / not_pad_mask.sum(-1)
     loss_lhs = torch.maximum(value_lhs.mean(), value_lhs.new_ones(value_lhs.mean().shape) * self.free_nats)
     loss_rhs = torch.maximum(value_rhs.mean(), value_rhs.new_ones(value_rhs.mean().shape) * self.free_nats)
 
@@ -165,6 +168,20 @@ class TransformerWorldModel(nn.Module):
 
     return model_loss, logs
 
+  @staticmethod
+  def _get_shifted_indices(batch_size, batch_length, shifts, device):
+      indices = torch.arange(batch_length, device=device).view(1, batch_length).expand(batch_size, -1)
+
+      return (indices - shifts.view(batch_size, 1)) % batch_length
+
+  @staticmethod
+  def _apply_shift(x, shifts):
+      shifted_indices = TransformerWorldModel._get_shifted_indices(x.shape[0], x.shape[1], shifts, x.device)
+      expanded_shape = list(shifted_indices.shape) + [1] * (len(x.shape) - len(shifted_indices.shape))
+      shifted_indices = shifted_indices.view(expanded_shape).expand_as(x)
+
+      return torch.gather(x, 1, shifted_indices)
+
   def imagine_ahead(self, actor, post_state, traj, sample_len, temp):
     """
     post_state:
@@ -178,29 +195,40 @@ class TransformerWorldModel(nn.Module):
     self.requires_grad_(False)
 
     action = traj['action']
+    pad_mask = traj['pad_mask']
 
     # randomly choose a state to start imagination
-    min_idx = self.H - 2 # trimed the last step, at least imagine 2 steps for TD target
-    perm = torch.randperm(min_idx, device=action.device)
-    min_idx = perm[0] + 1
+    # all non-padding states except for the last one
+    n_steps = pad_mask.shape[-1] - pad_mask.sum(-1) - 1
+    start_index = pad_mask.sum(-1) + (torch.rand_like(n_steps, dtype=torch.float64) * n_steps).floor()
+    shift = (pad_mask.shape[-1] - 1 - start_index).long()
+    assert start_index.min().item() > 0
+    assert shift.min().item() > 0
 
+    max_context_length = torch.clamp_max(pad_mask.shape[-1] - pad_mask.sum(-1) - shift , self.H - 2)
+    assert max_context_length.min().item() > 0
+    context_length = torch.round(torch.rand_like(max_context_length, dtype=torch.float64) * (max_context_length - 1) + 1).long()
+    non_context_length = pad_mask.shape[1] - context_length
+    is_out_of_context = torch.arange(pad_mask.shape[1], device=pad_mask.device).unsqueeze(0).expand(pad_mask.shape[0], -1) < non_context_length.unsqueeze(-1)
+    pad_mask[is_out_of_context] = 1.0
+    post_stoch = self._apply_shift(post_state['stoch'], shift)
+    action = self._apply_shift(action, shift - 1)
+
+    mean_context_length = torch.round(context_length.mean(dtype=torch.float32)).long()
     pred_state = defaultdict(list)
-
-    # pred_prior = {k: v.detach()[:, :min_idx] for k, v in post_state_trimed.items()}
-    post_stoch = post_state['stoch'][:, :min_idx]
-    action = action[:, 1: min_idx+1]
     imag_rnn_feat_list = []
     imag_action_list = []
 
-    for t in range(self.batch_length - min_idx):
-
-      pred_prior = self.dynamic.infer_prior_stoch(post_stoch[:, -sample_len:], temp, action[:, -sample_len:])
+    for t in range(self.batch_length - mean_context_length):
+      B, T = action[:, -sample_len:].shape[:2]
+      pred_prior = self.dynamic.infer_prior_stoch(post_stoch[:, -sample_len:], temp, action[:, -sample_len:], pad_mask[:, -sample_len:])
       rnn_feature = self.dynamic.get_feature(pred_prior, layer=self.reward_layer)
 
       pred_action_pdf = actor(rnn_feature[:, -1:].detach())
       imag_action = pred_action_pdf.sample()
       imag_action = imag_action + pred_action_pdf.mean - pred_action_pdf.mean.detach()  # straight through
       action = torch.cat([action, imag_action], dim=1)
+      pad_mask = torch.cat([pad_mask, torch.zeros_like(pad_mask[:, :1])], dim=1)
 
       for k, v in pred_prior.items():
         pred_state[k].append(v[:, -1:])
@@ -217,7 +245,7 @@ class TransformerWorldModel(nn.Module):
     reward = self.reward(rnn_features).mean
     discount = self.discount * self.pcont(rnn_features).mean
 
-    return rnn_features, pred_state, actions, reward, discount, min_idx
+    return rnn_features, pred_state, actions, reward, discount, mean_context_length
 
   def optimize_world_model(self, model_loss, model_optimizer, transformer_optimizer, writer, global_step):
 
@@ -317,12 +345,13 @@ class TransformerDynamic(nn.Module):
 
     actions = traj['action']
     dones = traj['done']
+    pad_mask = traj['pad_mask']
 
     # q(s_t | o_t)
     post = self.infer_post_stoch(obs_emb, temp, action=None)
     s_t = post['stoch'][:, :-1]
     # p(s_(t+1) | s_t, a_t)
-    prior = self.infer_prior_stoch(s_t, temp, actions[:, 1:])
+    prior = self.infer_prior_stoch(s_t, temp, actions[:, 1:], pad_mask[:, :-1])
 
     post['deter'] = prior['deter']
     post['o_t'] = prior['o_t']
@@ -406,7 +435,7 @@ class TransformerDynamic(nn.Module):
 
     return act_sto_emb
 
-  def infer_prior_stoch(self, prev_stoch, temp, actions):
+  def infer_prior_stoch(self, prev_stoch, temp, actions, pad_mask):
 
     B, T = prev_stoch.shape[:2]
     if self.stoch_discrete:
@@ -418,7 +447,7 @@ class TransformerDynamic(nn.Module):
       act_sto_emb = F.elu(act_sto_emb)
 
     s_t_reshape = act_sto_emb.reshape(B, T, -1, 1, 1)
-    o_t = self.cell(s_t_reshape, None) # B, T, L, D, H, W
+    o_t = self.cell(s_t_reshape, None, pad_mask) # B, T, L, D, H, W
 
     o_t = o_t.reshape(B, T, self.n_layers, -1)
     if self.deter_type == 'concat_o':
@@ -526,11 +555,11 @@ class ImgEncoder(nn.Module):
   def out(self, cfg):
     n_blocks = len(list(self.enc.children()))
     size = cfg.env.size
-    out = lambda x: int((x - self.kernel) / self.stride + 1)
+    out = lambda x: math.floor((x - self.kernel) / self.stride + 1)
     for _ in range(n_blocks):
         size = out(size)
 
-    return size
+    return int(size)
 
   def forward(self, ipts):
     """

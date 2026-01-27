@@ -40,9 +40,9 @@ class PositionalEmbedding(torch.nn.Module):
     self.register_buffer("inv_freq", inv_freq)
 
   def forward(self, positions):
-    sinusoid_inp = torch.einsum("i,j->ij", positions.float(), self.inv_freq)
+    sinusoid_inp = positions.float().unsqueeze(-1) * self.inv_freq
     pos_emb = torch.cat([sinusoid_inp.sin(), sinusoid_inp.cos()], dim=-1)
-    return pos_emb[:, None, :]
+    return pos_emb
 
 class PositionwiseFF(nn.Module):
   def __init__(self, cfg):
@@ -134,7 +134,7 @@ class MultiheadAttention(nn.Module):
     #### compute attention probability
     if attn_mask is not None:
       attn_score = attn_score.float().masked_fill(
-            attn_mask[:, :, None, None].bool(), -float('inf')).type_as(attn_score)
+            attn_mask[..., None].bool(), -float('inf')).type_as(attn_score)
 
     # [qlen x klen x bsz x n_head]
     attn_prob = F.softmax(attn_score, dim=1)
@@ -212,31 +212,40 @@ class Transformer(nn.Module):
     if self.last_ln:
       self.ln = nn.LayerNorm(d_model)
 
-  def _generate_square_subsequent_mask(self, T, H, W, device):
+  def _generate_square_subsequent_mask(self, H, W, device, pad_mask):
+    B, T = pad_mask.shape
     N = H * W
-    mask = (torch.triu(torch.ones(T, T,
-                                  device=device)) == 1).transpose(0, 1)
-    mask = mask.float().masked_fill(mask == 0, float('-1e10')).masked_fill(
-      mask == 1, float(0.0))
-
+    mask = (torch.triu(torch.ones(T, T, device=device)) == 1).transpose(0, 1)
     mask = torch.repeat_interleave(mask, N, dim=0)
     mask = torch.repeat_interleave(mask, N, dim=1)
+    mask = mask[None].expand(B, -1, -1)
+    mask = mask * (1 - pad_mask[:, None, :])
+    torch.diagonal(mask, dim1=1, dim2=2).fill_(True)
+
+    mask = mask.float().masked_fill(mask == 0, float('-1e10')).masked_fill(mask == 1, float(0.0))
 
     return mask
 
-  def forward(self, z, actions):
+  @staticmethod
+  def masked_position(pad_mask):
+      zeros_mask = pad_mask == 0
+      prefix_zeros = zeros_mask.cumsum(dim=1)
+
+      return (prefix_zeros - 1) * zeros_mask
+
+  def forward(self, z, actions, pad_mask):
     B, T, D, H, W = z.shape
 
-    attn_mask = self._generate_square_subsequent_mask(T, H, W, z.device) # T, T
+    attn_mask = self._generate_square_subsequent_mask(H, W, z.device, pad_mask) # T, T
 
     # (T, 1, d_model)
-    pos_ips = torch.arange(T*H*W, dtype=torch.float).to(z.device)
+    pos_ips = self.masked_position(pad_mask)
     pos_embs = self.drop(self.pos_embs(pos_ips))
 
     if actions is None:
 
       z = rearrange(z, 'b t d h w -> (t h w) b d')
-      encoder_inp = z + pos_embs
+      encoder_inp = z + pos_embs.permute(1, 0, 2)
 
     else:
       z = rearrange(z, 'b t d h w -> (t h w) b d')
@@ -250,6 +259,7 @@ class Transformer(nn.Module):
     # T, B, d_model
     output = encoder_inp
     output_list = []
+    attn_mask = attn_mask.permute(1, 2, 0) # T, T, B
     for i, layer in enumerate(self.layers):
       output = layer(output, attn_mask=attn_mask) # T, B, D
 

@@ -70,10 +70,12 @@ class TransDreamer(nn.Module):
 
     rec_img = logs['dec_img']
     gt_img = logs['gt_img']  # B, {1:T}, C, H, W
+    combined = torch.cat([gt_img[:4], rec_img[:4]], dim=-2).clamp(0., 1.).cpu()
+    sizes = [-1] * len(combined.shape)
+    sizes[-3] = 3
+    combined = combined.expand(sizes)
 
-    writer.add_video('train/rec - gt',
-                      torch.cat([gt_img[:4], rec_img[:4]], dim=-2).clamp(0., 1.).cpu(),
-                      global_step=global_step)
+    writer.add_video('train/rec - gt', combined, global_step=global_step)
 
     for k, v in logs.items():
 
@@ -257,7 +259,7 @@ class TransDreamer(nn.Module):
       for k, v in post.items():
         state[k] = torch.cat([state[k], v], dim=1)[:, -context_len:]
 
-    pred_prior = self.world_model.dynamic.infer_prior_stoch(s_t[:, :-1], temp, action)
+    pred_prior = self.world_model.dynamic.infer_prior_stoch(s_t[:, :-1], temp, action, torch.zeros(action.shape[:2], device=action.device))
 
     post_state_trimed = {}
     for k, v in state.items():

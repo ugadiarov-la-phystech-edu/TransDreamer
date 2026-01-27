@@ -42,6 +42,9 @@ def video_summary(writer, name, video, step=None):
   if np.issubdtype(video.dtype, np.floating):
     video = np.clip(255 * video, 0, 255).astype(np.uint8)
 
+  if video.shape[-3] == 1:
+    video = np.repeat(video, 3, axis=-3)
+
   writer.add_video(
     name,
     torch.tensor(video),

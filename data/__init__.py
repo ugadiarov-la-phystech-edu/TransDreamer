@@ -21,7 +21,13 @@ class EnvIterDataset(IterableDataset):
     def load_episodes(self, balance=False):
         directory = pathlib.Path(self.data_dir).expanduser()
         worker_info = get_worker_info()
-        random = np.random.RandomState((self.seed + worker_info.seed) % (1 << 32))
+        if worker_info is None:
+            # we are in the main process
+            seed = 0
+        else:
+            seed = worker_info.seed
+
+        random = np.random.RandomState((self.seed + seed) % (1 << 32))
         cache = {}
         while True:
             for filename in directory.glob("*.npz"):
@@ -45,20 +51,37 @@ class EnvIterDataset(IterableDataset):
                 if self.batch_length:
                     total = len(next(iter(episode.values())))
                     available = total - self.batch_length
-                    if available < 1:
-                        print(f"Skipped short episode of length {available}.")
-                        continue
-                    if balance:
-                        index = min(random.randint(0, total), available)
+                    if available >= 0:
+                        if balance:
+                            index = min(random.randint(0, total), available)
+                        else:
+                            index = int(random.randint(0, available + 1))
+                            # index = available
+                        episode = {
+                            k: v[index : index + self.batch_length]
+                            for k, v in episode.items()
+                        }
+                        episode['pad_mask'] = np.zeros((self.batch_length,), dtype=np.float32)
                     else:
-                        index = int(random.randint(0, available + 1))
-                        # index = available
-                    episode = {
-                        k: v[index : index + self.batch_length]
-                        for k, v in episode.items()
-                    }
-                    # episode = self.pad_episode(episode, self.batch_length)
+                        episode = self.pad_episode(episode)
+
                 yield episode
+
+    def pad_episode(self, episode):
+        total = len(next(iter(episode.values())))
+        pad_length = self.batch_length - total
+        assert pad_length > 0
+        episode = {k: self._prepend(v, pad_length) for k, v in episode.items()}
+        episode['pad_mask'] = np.zeros((self.batch_length,), dtype=np.float32)
+        episode['pad_mask'][:pad_length] = True
+        return episode
+
+    @staticmethod
+    def _prepend(x, length):
+        shape = list(x.shape)
+        shape[0] = length
+        prefix = np.zeros(shape, dtype=x.dtype)
+        return np.concatenate([prefix, x], axis=0)
 
     def __iter__(self):
         return self.load_episodes()
