@@ -145,10 +145,10 @@ def train(model, cfg, device):
   done_env_ids = torch.arange(train_env.n_envs, device=device)
   input_type = cfg.arch.world_model.input_type
   temp = cfg.arch.world_model.temp_start
-  next_train_step = cfg.train.train_every
-  next_log_step = cfg.train.log_every_step
-  next_eval_step = math.inf if cfg.train.eval_every_step <= 0 else cfg.train.eval_every_step
-  next_checkpoint_step = cfg.train.checkpoint_every_step
+  next_train_step = global_step
+  next_log_step = global_step
+  next_eval_step = math.inf if cfg.train.eval_every_step <= 0 else global_step
+  next_checkpoint_step = global_step
 
   while global_step < cfg.total_steps:
     global_step += train_env.n_envs
