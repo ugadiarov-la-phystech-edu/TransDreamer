@@ -139,10 +139,10 @@ class TransDreamer(nn.Module):
 
     return grad_norm_value.item()
 
-  def world_model_loss(self, global_step, traj, temp):
-    return self.world_model.compute_loss(traj, global_step, temp)
+  def world_model_loss(self, global_step, traj, temp, do_log=True):
+    return self.world_model.compute_loss(traj, global_step, temp, do_log=do_log)
 
-  def actor_and_value_loss(self, global_step, post_state, traj, temp):
+  def actor_and_value_loss(self, global_step, post_state, traj, temp, do_log=True):
     self.update_slow_target(global_step)
     self.value.eval()
     self.value.requires_grad_(False)
@@ -186,7 +186,7 @@ class TransDreamer(nn.Module):
     imagine_value = imagine_value_dist.mean
   
 
-    if global_step % self.log_every_step == 0:
+    if do_log or global_step % self.log_every_step == 0:
       imagine_dist = Independent(OneHotCategorical(logits=imagine_state['logits']), 1)
       if self.action_dist == 'onehot':
         action_samples = imagine_action.argmax(dim=-1).float().detach()

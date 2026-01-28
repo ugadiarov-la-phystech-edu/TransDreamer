@@ -188,7 +188,7 @@ def train(model, cfg, device):
       transformer_optimizer = optimizers['transformer_optimizer']
       if transformer_optimizer is not None:
         transformer_optimizer.zero_grad()
-      model_loss, model_logs, prior_state, post_state = model.world_model_loss(global_step, traj, temp)
+      model_loss, model_logs, prior_state, post_state = model.world_model_loss(global_step, traj, temp, do_log=True)
       grad_norm_model = model.world_model.optimize_world_model(model_loss, model_optimizer, transformer_optimizer, writer, global_step)
       if cfg.arch.world_model.transformer.warm_up:
         lr = anneal_learning_rate(global_step, cfg)
@@ -201,7 +201,7 @@ def train(model, cfg, device):
       value_optimizer = optimizers['value_optimizer']
       actor_optimizer.zero_grad()
       value_optimizer.zero_grad()
-      actor_loss, value_loss, actor_value_logs = model.actor_and_value_loss(global_step, post_state, traj, temp)
+      actor_loss, value_loss, actor_value_logs = model.actor_and_value_loss(global_step, post_state, traj, temp, do_log=True)
       grad_norm_actor = model.optimize_actor(actor_loss, actor_optimizer, writer, global_step)
       grad_norm_value = model.optimize_value(value_loss, value_optimizer, writer, global_step)
 

@@ -74,7 +74,7 @@ class TransformerWorldModel(nn.Module):
   def forward(self, traj):
     raise NotImplementedError
 
-  def compute_loss(self, traj, global_step, temp):
+  def compute_loss(self, traj, global_step, temp, do_log=True):
 
     self.train()
     self.requires_grad_(True)
@@ -83,11 +83,11 @@ class TransformerWorldModel(nn.Module):
     prior_state, post_state = self.dynamic(traj, None, temp)
 
     # compute world model loss given state representation
-    model_loss, model_logs = self.world_model_loss(global_step, traj, prior_state, post_state, temp)
+    model_loss, model_logs = self.world_model_loss(global_step, traj, prior_state, post_state, temp, do_log=do_log)
 
     return model_loss, model_logs, prior_state, post_state
 
-  def world_model_loss(self, global_step, traj, prior_state, post_state, temp):
+  def world_model_loss(self, global_step, traj, prior_state, post_state, temp, do_log=True):
 
     obs = traj[self.input_type]
     obs = obs / 255. - 0.5
@@ -139,7 +139,7 @@ class TransformerWorldModel(nn.Module):
 
     model_loss = image_pred_loss + reward_pred_loss + kl_loss + pcont_loss
 
-    if global_step % self.log_every_step == 0:
+    if do_log or global_step % self.log_every_step == 0:
       post_dist = Independent(OneHotCategorical(logits=post_state_trimed['logits']), 1)
       prior_dist = Independent(OneHotCategorical(logits=prior_state['logits']), 1)
       logs = {
