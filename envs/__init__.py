@@ -1,4 +1,9 @@
+import time
+
+import cloudpickle
 import numpy as np
+import portal
+import torch
 
 from .atari_env import OneHotAction, TimeLimit, Collect, RewardObs
 from .atari_env import Atari
@@ -46,7 +51,29 @@ def summarize_episode(episode, config, datadir, writer, prefix):
 
   writer.flush()
 
-def make_env(cfg, writer, prefix, datadir, store, seed=0):
+
+def summarize(global_step, n_episodes, episode_stats, config, writer, prefix):
+  env_step = global_step * config.env.action_repeat
+  for episode_stat in episode_stats:
+    length = episode_stat['length'] * config.env.action_repeat
+    ret = episode_stat['return']
+    print(f'{prefix.title()} episode of length {length} with return {ret:.1f}.')
+    metrics = [
+      (f'{prefix}/return', float(ret)),
+      (f'{prefix}/length', float(length)),
+      (f'{prefix}/episodes', n_episodes)]
+    with (pathlib.Path(config.logdir) / 'metrics.jsonl').open('a') as f:
+      f.write(json.dumps(dict([('step', env_step)] + metrics)) + '\n')
+
+  agg_metrics = [
+      (f'{prefix}/return', np.mean([e['return'] for e in episode_stats])),
+      (f'{prefix}/length', np.mean([e['length'] for e in episode_stats])),
+      (f'{prefix}/episodes', n_episodes)]
+  [writer.add_scalar('sim/' + k, v, env_step) for k, v in agg_metrics]
+  writer.flush()
+
+
+def make_env(cfg, datadir, store, seed=0):
 
   suite, task = cfg.env.name.split('_', 1)
 
@@ -73,10 +100,137 @@ def make_env(cfg, writer, prefix, datadir, store, seed=0):
 
   callbacks = []
   if store:
-    callbacks.append(lambda ep: tools.save_episodes(datadir, [ep]))
-  callbacks.append(
-      lambda ep: summarize_episode(ep, cfg, datadir, writer, prefix))
+    callbacks.append(lambda ep: tools.save_episodes(datadir, [ep], env_id=seed))
   env = Collect(env, callbacks, cfg.env.precision)
   env = RewardObs(env)
 
   return env
+
+
+class BatchEnv:
+  def __init__(self, make_env_fns, parallel, input_type, device='cpu'):
+    self.parallel = parallel
+    self.n_envs = len(make_env_fns)
+    self.device = device
+    self.input_type = input_type
+    if self.parallel:
+      import multiprocessing as mp
+      context = mp.get_context()
+      self.pipes, pipes = zip(*[context.Pipe() for _ in range(len(make_env_fns))])
+      self.stop = context.Event()
+      fns = [cloudpickle.dumps(fn) for fn in make_env_fns]
+      self.procs = [
+          portal.Process(self._env_server, self.stop, i, pipe, fn, start=True)
+          for i, (fn, pipe) in enumerate(zip(fns, pipes))]
+      self.pipes[0].send(('action_space',))
+      self.action_space = self._receive(self.pipes[0])
+      self.pipes[0].send(('observation_space',))
+      self.observation_space = self._receive(self.pipes[0])
+    else:
+      self.envs = [fn() for fn in make_env_fns]
+      self.action_space = self.envs[0].action_space
+      self.observation_space = self.envs[0].observation_space
+
+  def _receive(self, pipe):
+    try:
+      msg, arg = pipe.recv()
+      if msg == 'error':
+        raise RuntimeError(arg)
+      assert msg == 'result'
+      return arg
+    except Exception:
+      print('Terminating workers due to an exception.')
+      [proc.kill() for proc in self.procs]
+      raise
+
+  @staticmethod
+  def _env_server(stop, envid, pipe, ctor):
+    try:
+      ctor = cloudpickle.loads(ctor)
+      env = ctor()
+      while not stop.is_set():
+        if not pipe.poll(0.1):
+          time.sleep(0.1)
+          continue
+        try:
+          msg, *args = pipe.recv()
+        except EOFError:
+          return
+        if msg == 'step':
+          assert len(args) == 1
+          act = args[0]
+          step_result = env.step(act)
+          pipe.send(('result', step_result))
+        elif msg == 'reset':
+          assert len(args) == 0
+          obs = env.reset()
+          pipe.send(('result', obs))
+        elif msg == 'render':
+          assert len(args) == 1
+          mode = args[0]
+          image = env.render(mode)
+          pipe.send(('result', image))
+        elif msg == 'observation_space':
+          assert len(args) == 0
+          pipe.send(('result', env.observation_space))
+        elif msg == 'action_space':
+          assert len(args) == 0
+          pipe.send(('result', env.action_space))
+        elif msg == 'close':
+          assert len(args) == 0
+          break
+        else:
+          raise ValueError(f'Invalid message {msg}')
+    except ConnectionResetError:
+      print('Connection to driver lost')
+    except Exception as e:
+      pipe.send(('error', e))
+      raise
+    finally:
+      try:
+        env.close()
+      except Exception:
+        pass
+      pipe.close()
+
+  def reset(self, env_ids=None):
+    if env_ids is None:
+        env_ids = range(self.n_envs)
+
+    if self.parallel:
+      [self.pipes[env_id].send(('reset',)) for env_id in env_ids]
+      obs = [self._receive(self.pipes[env_id]) for env_id in env_ids]
+    else:
+      obs = [self.envs[env_id].reset() for env_id in env_ids]
+
+    obs = {k: [o[k] for o in obs] for k in obs[0]}
+    obs[self.input_type] = torch.as_tensor(np.concatenate(obs[self.input_type], axis=0), device=self.device)
+    return obs
+
+  def step(self, acts):
+    if self.parallel:
+      [pipe.send(('step', act)) for pipe, act in zip(self.pipes, acts)]
+      step_results = [self._receive(pipe) for pipe in self.pipes]
+    else:
+      step_results = [env.step(act) for env, act in zip(self.envs, acts)]
+
+    obs, reward, done, info = zip(*step_results)
+    obs = {k: [o[k] for o in obs] for k in obs[0]}
+    obs[self.input_type] = torch.as_tensor(np.concatenate(obs[self.input_type], axis=0), device=self.device)
+
+    return obs, reward, done, info
+
+  def close(self):
+    if self.parallel:
+      [proc.kill() for proc in self.procs]
+    else:
+      [env.close() for env in self.envs]
+
+  def sample_random_action(self, n_envs=None):
+    if n_envs is None:
+        n_envs = self.n_envs
+
+    action = np.zeros((n_envs, self.action_space.n,), dtype=np.float)
+    idx = np.random.randint(0, self.action_space.n, size=(n_envs,))
+    action[np.arange(n_envs), idx] = 1
+    return action

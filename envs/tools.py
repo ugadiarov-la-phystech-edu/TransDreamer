@@ -115,7 +115,7 @@ def count_episodes(directory):
   return episodes, steps
 
 
-def save_episodes(directory, episodes):
+def save_episodes(directory, episodes, env_id):
   directory = pathlib.Path(directory).expanduser()
   directory.mkdir(parents=True, exist_ok=True)
   timestamp = datetime.datetime.now().strftime('%Y%m%dT%H%M%S')
@@ -126,7 +126,7 @@ def save_episodes(directory, episodes):
       abs_reward = sum(episode['abs_reward'])
     else:
       abs_reward = sum(episode['reward'])
-    filename = directory / f'{timestamp}_{identifier}_{length}_{abs_reward}.npz'
+    filename = directory / f'{timestamp}_E{env_id}_{identifier}_{length}_{abs_reward}.npz'
     with io.BytesIO() as f1:
       np.savez_compressed(f1, **episode)
       f1.seek(0)

@@ -229,7 +229,7 @@ class TransDreamer(nn.Module):
     return target, weights
 
 
-  def policy(self, prev_obs, obs, action, gradient_step, temp, state=None, training=True, context_len=49):
+  def policy(self, prev_obs, obs, action, gradient_step, temp, state, done_env_ids, training=True, context_len=49):
     """
 
     :param obs: B, C, H, W
@@ -244,22 +244,26 @@ class TransDreamer(nn.Module):
     obs_emb = self.world_model.dynamic.img_enc(obs) # B, T, C
     post = self.world_model.dynamic.infer_post_stoch(obs_emb, temp, action=None) # B, T, N, C
 
-    if state is None:
-      state = post
-      prev_obs = prev_obs.unsqueeze(1) / 255. - 0.5  # B, T, C, H, W
+    if done_env_ids.shape[0] > 0:
+      # initialize state for new episodes
+      prev_obs = prev_obs[done_env_ids].unsqueeze(1) / 255. - 0.5
       prev_obs_emb = self.world_model.dynamic.img_enc(prev_obs)  # B, T, C
       prev_post = self.world_model.dynamic.infer_post_stoch(prev_obs_emb, temp, action=None)  # B, T, N, C
 
-      for k, v in post.items():
-        state[k] = torch.cat([prev_post[k], v], dim=1)
-      s_t = state['stoch']
+      for k in post:
+        state[k][done_env_ids, :-1] = 0
+        state[k][done_env_ids, -1:] = prev_post[k]
 
-    else:
-      s_t = torch.cat([state['stoch'], post['stoch'][:, -1:]], dim=1)[:, -context_len:]
-      for k, v in post.items():
-        state[k] = torch.cat([state[k], v], dim=1)[:, -context_len:]
+      state['padding'][done_env_ids, :-1] = 1
+      state['padding'][done_env_ids, -1] = 0
 
-    pred_prior = self.world_model.dynamic.infer_prior_stoch(s_t[:, :-1], temp, action, torch.zeros(action.shape[:2], device=action.device))
+    for k, v in post.items():
+      state[k] = torch.cat([state[k], v], dim=1)[:, -context_len:]
+
+    state['padding'] = torch.cat([state['padding'], torch.zeros_like(state['padding'][:, :1])], dim=1)[:, -context_len:]
+    s_t = state['stoch']
+
+    pred_prior = self.world_model.dynamic.infer_prior_stoch(s_t[:, :-1], temp, action, state['padding'][:, :-1])
 
     post_state_trimed = {}
     for k, v in state.items():

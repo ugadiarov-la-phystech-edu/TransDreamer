@@ -147,7 +147,7 @@ class Collect:
     if done:
       episode = {k: [t[k] for t in self._episode] for k in self._episode[0]}
       episode = {k: self._convert(v) for k, v in episode.items()}
-      info['episode'] = episode
+      info['episode'] = {'length': len(episode['reward']) - 1, 'return': episode['reward'].sum()}
       for callback in self._callbacks:
         callback(episode)
     obs['image'] = obs['image'][None,...]
@@ -195,7 +195,7 @@ class RewardObs:
   def step(self, action):
     obs, reward, done, info = self._env.step(action)
     obs['reward'] = reward
-    return obs, reward, done
+    return obs, reward, done, info
 
   def reset(self):
     obs = self._env.reset()

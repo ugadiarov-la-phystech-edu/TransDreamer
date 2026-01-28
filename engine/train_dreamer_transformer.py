@@ -1,3 +1,5 @@
+from functools import partial
+
 import comet_ml
 import torch
 import torch.nn as nn
@@ -5,7 +7,7 @@ from torch.utils.tensorboard import SummaryWriter
 from torchvision import utils as vutils
 from utils import Checkpointer
 from solver import get_optimizer
-from envs import make_env, count_steps
+from envs import make_env, count_steps, BatchEnv, count_episodes, summarize
 from data import EnvIterDataset
 from torch.utils.data import DataLoader
 from torch.cuda.amp import GradScaler, autocast
@@ -108,51 +110,60 @@ def train(model, cfg, device):
 
   datadir = os.path.join(cfg.data.datadir, cfg.exp_name, cfg.env.name, cfg.run_id, 'train_episodes')
   test_datadir = os.path.join(cfg.data.datadir, cfg.exp_name, cfg.env.name, cfg.run_id, 'test_episodes')
-  train_env = make_env(cfg, writer, 'train', datadir, store=True)
-  test_env = make_env(cfg, writer, 'test', test_datadir, store=True)
+  train_env = BatchEnv(
+      [partial(make_env, cfg, datadir, store=True, seed=i) for i in range(cfg.env.n_envs)],
+      input_type=cfg.arch.world_model.input_type, parallel=cfg.env.parallel, device=device)
+  test_env = BatchEnv([partial(make_env, cfg, test_datadir, store=True, seed=i + cfg.env.n_envs)
+                       for i in range(cfg.env.n_envs_eval)], input_type = cfg.arch.world_model.input_type,
+                       parallel=cfg.env.parallel, device=device)
 
   # fill in length of 5000 frames
   train_env.reset()
   steps = count_steps(datadir, cfg)
-  length = 0
   while steps < cfg.arch.prefill:
     action = train_env.sample_random_action()
-    next_obs, reward, done = train_env.step(action[0])
-    length += 1
-    steps += done * length
-    length = length * (1. - done)
-    if done:
-      train_env.reset()
+    obss, rewards, dones, infos = train_env.step(action)
+    steps += train_env.n_envs
+    done_env_ids = [i for i, done in enumerate(dones) if done]
+    if len(done_env_ids) > 0:
+      train_env.reset(done_env_ids)
 
-  steps = count_steps(datadir, cfg)
-  print(f'collected {steps} steps. Start training...')
+  episodes, steps = count_episodes(datadir)
+  print(f'collected {episodes} episodes of {steps} steps. Start training...')
   train_ds = EnvIterDataset(datadir, cfg.train.train_steps, cfg.train.batch_length)
   train_dl = DataLoader(train_ds, batch_size=cfg.train.batch_size, num_workers=4)
   train_iter = iter(train_dl)
   global_step = max(global_step, steps)
 
-  obs = train_env.reset()
-  state = None
-  action_list = torch.zeros(1, 1, cfg.env.action_size).float() # T, C
-  action_list[0, 0, 0] = 1.
+  obss = train_env.reset()
+  state = {'stoch': torch.zeros(train_env.n_envs, cfg.train.batch_length, cfg.arch.world_model.RSSM.stoch_discrete, cfg.arch.world_model.RSSM.stoch_size, device=device)}
+  state['logits'] = torch.zeros_like(state['stoch'])
+  state['padding'] = torch.ones(train_env.n_envs, cfg.train.batch_length, device=device)
+  action_list = torch.zeros(train_env.n_envs, cfg.train.batch_length - 1, cfg.env.action_size).float() # B, T, C
+  action_list[:, -1, 0] = 1. # always start episode with this action
+  done_env_ids = torch.arange(train_env.n_envs, device=device)
   input_type = cfg.arch.world_model.input_type
   temp = cfg.arch.world_model.temp_start
 
   while global_step < cfg.total_steps:
+    global_step += train_env.n_envs
 
     with torch.no_grad():
       model.eval()
-      next_obs, reward, done = train_env.step(action_list[0, -1].detach().cpu().numpy())
-      prev_image = torch.tensor(obs[input_type])
-      next_image = torch.tensor(next_obs[input_type])
-      action_list, state = model.policy(prev_image.to(device), next_image.to(device), action_list.to(device),
-                                        global_step, 0.1, state, context_len=cfg.train.batch_length)
-      obs = next_obs
-      if done:
-        train_env.reset()
-        state = None
-        action_list = torch.zeros(1, 1, cfg.env.action_size).float()  # T, C
-        action_list[0, 0, 0] = 1.
+      next_obss, rewards, dones, infos = train_env.step(action_list[:, -1].detach().cpu().numpy())
+      prev_images = obss[input_type]
+      next_images = next_obss[input_type]
+      action_list, state = model.policy(prev_images, next_images, action_list.to(device),
+                                        global_step, 0.1, state, context_len=cfg.train.batch_length,
+                                        done_env_ids=done_env_ids)
+      obss = next_obss
+      done_env_ids = torch.tensor([i for i, done in enumerate(dones) if done], device=device)
+      if done_env_ids.shape[0] > 0:
+        obss[input_type][done_env_ids] = train_env.reset(done_env_ids)[input_type]
+        action_list[done_env_ids] = 0
+        action_list[done_env_ids, -1, 0] = 1
+        episodes += done_env_ids.shape[0]
+        summarize(global_step, episodes, [infos[i]['episode'] for i, done in enumerate(dones) if done], cfg, writer, 'train')
 
     if global_step % cfg.train.train_every == 0:
 
@@ -206,11 +217,9 @@ def train(model, cfg, device):
           writer.add_scalar('train_grad_norm/' + k, v, global_step=global_step)
 
     # evaluate RL
-    if global_step % cfg.train.eval_every_step == 0:
+    if cfg.train.eval_every_step > 0 and global_step % cfg.train.eval_every_step == 0:
       simulate_test(model, test_env, cfg, global_step, device)
 
     if global_step % cfg.train.checkpoint_every_step == 0:
       env_step = count_steps(datadir, cfg)
       checkpointer.save('', model, optimizers, global_step, env_step)
-
-    global_step += 1

@@ -114,6 +114,9 @@ cfg = CN({
     'all_actions': True,
     'time_penalty': 0.0,
     'size': 64,
+    'n_envs': 1,
+    'n_envs_eval': 1,
+    'parallel': False,
   },
   'rl': {
     'discount': 0.999,
