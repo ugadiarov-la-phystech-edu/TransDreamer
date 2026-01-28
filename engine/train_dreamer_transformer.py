@@ -1,3 +1,4 @@
+import math
 from functools import partial
 
 import comet_ml
@@ -144,6 +145,10 @@ def train(model, cfg, device):
   done_env_ids = torch.arange(train_env.n_envs, device=device)
   input_type = cfg.arch.world_model.input_type
   temp = cfg.arch.world_model.temp_start
+  next_train_step = cfg.train.train_every
+  next_log_step = cfg.train.log_every_step
+  next_eval_step = math.inf if cfg.train.eval_every_step <= 0 else cfg.train.eval_every_step
+  next_checkpoint_step = cfg.train.checkpoint_every_step
 
   while global_step < cfg.total_steps:
     global_step += train_env.n_envs
@@ -165,7 +170,8 @@ def train(model, cfg, device):
         episodes += done_env_ids.shape[0]
         summarize(global_step, episodes, [infos[i]['episode'] for i, done in enumerate(dones) if done], cfg, writer, 'train')
 
-    if global_step % cfg.train.train_every == 0:
+    if global_step >= next_train_step:
+      next_train_step += cfg.train.train_every
 
       temp = anneal_temp(global_step, cfg)
 
@@ -199,7 +205,8 @@ def train(model, cfg, device):
       grad_norm_actor = model.optimize_actor(actor_loss, actor_optimizer, writer, global_step)
       grad_norm_value = model.optimize_value(value_loss, value_optimizer, writer, global_step)
 
-      if global_step % cfg.train.log_every_step == 0:
+      if global_step >= next_log_step:
+        next_log_step += cfg.train.log_every_step
 
         logs.update(model_logs)
         logs.update(actor_value_logs)
@@ -217,9 +224,11 @@ def train(model, cfg, device):
           writer.add_scalar('train_grad_norm/' + k, v, global_step=global_step)
 
     # evaluate RL
-    if cfg.train.eval_every_step > 0 and global_step % cfg.train.eval_every_step == 0:
+    if global_step >= next_eval_step:
+      next_eval_step += cfg.train.eval_every_step
       simulate_test(model, test_env, cfg, global_step, device)
 
-    if global_step % cfg.train.checkpoint_every_step == 0:
+    if global_step >= next_checkpoint_step:
+      next_checkpoint_step += cfg.train.checkpoint_every_step
       env_step = count_steps(datadir, cfg)
       checkpointer.save('', model, optimizers, global_step, env_step)
