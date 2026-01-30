@@ -44,10 +44,11 @@ cfg = CN(
                 "temp_decay_steps": 1e6,
                 "input": {
                     "type": "image", # or "slot"
-                    "params": {
-                        "image": {},
-                        "slot": {"n_slot": 3, "dim": 7},
-                    },
+                },
+                "slot_extractor": {
+                    "config_path": "",
+                    "checkpoint_path": "",
+                    "image_size": -1,
                 },
                 "train_wm_steps": 1,
                 "transformer": {

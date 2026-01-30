@@ -1,0 +1,30 @@
+name: SLATE
+tau_start: 1.0
+tau_final: 0.1
+tau_steps: 30000
+hard: false
+use_cnn_feat: false
+use_bcdec: false
+dvae:
+  vocab_size: 4096
+  d_model: 192
+cnn:
+  hidden_size: 64
+slotattr:
+  num_iterations: 3
+  num_slots: 10
+  num_slot_heads: 1
+  slot_size: 192
+  mlp_hidden_size: 192
+  pos_channels: 4
+tfdec:
+  num_dec_blocks: 4
+  num_dec_heads: 4
+learning:
+  lr_half_life: 250000
+  lr_dvae: 0.0003
+  lr_enc: 0.0001
+  lr_dec: 0.0003
+  lr_warmup_steps: 30000
+  dropout: 0.1
+  clip: 0.05

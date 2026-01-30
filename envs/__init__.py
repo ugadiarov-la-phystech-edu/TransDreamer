@@ -5,6 +5,7 @@ import numpy as np
 import portal
 import torch
 
+from ocr.slate.slate_extractor import SLATEExtractor
 from .atari_env import OneHotAction, TimeLimit, Collect, RewardObs
 from .atari_env import Atari
 from .crafter import Crafter
@@ -234,19 +235,18 @@ class BatchEnv:
 
 
 class SlotBatchEnv(BatchEnv):
-  def __init__(self, make_env_fns, parallel, input_type, on_episode_end, device='cpu'):
+  def __init__(self, make_env_fns, parallel, input_type, on_episode_end, cfg, device='cpu'):
     super(SlotBatchEnv, self).__init__(make_env_fns, parallel, 'image', device)
     assert input_type == 'slot', f'{input_type} != slot'
     self.device = device
     self.slot_input_type = input_type
-    self.n_slot = 3
-    self.dim = 8
+    self.slot_extractor = SLATEExtractor(cfg.config_path, cfg.checkpoint_path, cfg.image_size, device)
     self.on_episode_end = on_episode_end
     self._episode_slots = [None] * self.n_envs
 
     import gym
     self.observation_space = gym.spaces.Dict({
-        'slot': gym.spaces.Box(low=0, high=255, shape=(self.n_slot, self.dim), dtype=np.float32),
+        'slot': gym.spaces.Box(low=0, high=255, shape=(self.slot_extractor.n_slots, self.slot_extractor.dim), dtype=np.float32),
         'reward': self.observation_space['reward'],
     })
 
@@ -259,20 +259,23 @@ class SlotBatchEnv(BatchEnv):
     return slot
 
   def reset(self, env_ids=None):
+    if env_ids is None:
+        env_ids = range(self.n_envs)
+
     obs = super(SlotBatchEnv, self).reset(env_ids)
-    slots = self._generate_slots(env_ids)
-    env_ids = range(self.n_envs) if env_ids is None else env_ids
+    images = obs.pop('image')
+    slots = self.slot_extractor.get_slots(images, previous_slots=None)
     for i, env_id in enumerate(env_ids):
       self._episode_slots[env_id] = [slots[i]]
 
-    del obs['image']
     obs[self.slot_input_type] = slots
 
     return obs
 
   def step(self, acts):
     obss, rewards, dones, infos = super(SlotBatchEnv, self).step(acts)
-    slots = self._generate_slots()
+    images = obss.pop('image')
+    slots = self.slot_extractor.get_slots(images, previous_slots=torch.stack([slot_history[-1] for slot_history in self._episode_slots]))
     for i in range(self.n_envs):
       self._episode_slots[i].append(slots[i])
 
@@ -284,7 +287,6 @@ class SlotBatchEnv(BatchEnv):
         episode['slot'] = torch.stack(self._episode_slots[i]).detach().cpu().numpy()
         self.on_episode_end(episode, i)
 
-    del obss['image']
     obss[self.slot_input_type] = slots
 
     return obss, rewards, dones, infos

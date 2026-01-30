@@ -113,11 +113,11 @@ def train(model, cfg, device):
   test_datadir = os.path.join(cfg.data.datadir, cfg.exp_name, cfg.env.name, cfg.run_id, 'test_episodes')
   train_env = SlotBatchEnv(
       [partial(make_env, cfg, datadir, store=True, seed=i) for i in range(cfg.env.n_envs)],
-      input_type=cfg.arch.world_model.input.type, parallel=cfg.env.parallel, device=device,
+      input_type=cfg.arch.world_model.input.type, parallel=cfg.env.parallel, device=device, cfg=cfg.arch.world_model.slot_extractor,
       on_episode_end=lambda ep, env_id: tools.save_episodes(datadir, [ep], env_id=env_id))
   test_env = SlotBatchEnv([partial(make_env, cfg, test_datadir, store=True, seed=i + cfg.env.n_envs)
                        for i in range(cfg.env.n_envs_eval)], input_type=cfg.arch.world_model.input.type,
-                       parallel=cfg.env.parallel, device=device,
+                       parallel=cfg.env.parallel, device=device, cfg=cfg.arch.world_model.slot_extractor,
       on_episode_end=lambda ep, env_id: tools.save_episodes(test_datadir, [ep], env_id=env_id))
 
   # fill in length of 5000 frames
@@ -141,7 +141,7 @@ def train(model, cfg, device):
   obss = train_env.reset()
   state_shape = (train_env.n_envs, cfg.train.batch_length, cfg.arch.world_model.RSSM.stoch_discrete, cfg.arch.world_model.RSSM.stoch_size)
   if cfg.arch.world_model.input.type == 'slot':
-      state_shape = (train_env.n_envs, cfg.train.batch_length, cfg.arch.world_model.input.params.slot.n_slot,
+      state_shape = (train_env.n_envs, cfg.train.batch_length, train_env.slot_extractor.n_slots,
                      cfg.arch.world_model.RSSM.stoch_discrete, cfg.arch.world_model.RSSM.stoch_size)
   state = {'stoch': torch.zeros(*state_shape, device=device)}
   state['logits'] = torch.zeros_like(state['stoch'])

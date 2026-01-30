@@ -1,6 +1,7 @@
 import copy
 import math
 
+from omegaconf import OmegaConf
 from torch.distributions.bernoulli import Bernoulli
 from torch.distributions.one_hot_categorical import OneHotCategorical
 from torch.distributions import Independent, Normal, Bernoulli
@@ -38,7 +39,8 @@ class TransformerWorldModel(nn.Module):
     else:
       dense_input_size = d_model + self.stoch_size
 
-    self.img_dec = DenseDecoder(dense_input_size, cfg.arch.world_model.reward.layers, cfg.arch.world_model.reward.num_units, (cfg.arch.world_model.input.params.slot.dim,),
+    slot_extractor_cfg = OmegaConf.load(cfg.arch.world_model.slot_extractor.config_path)
+    self.img_dec = DenseDecoder(dense_input_size, cfg.arch.world_model.reward.layers, cfg.arch.world_model.reward.num_units, (slot_extractor_cfg.slotattr.slot_size,),
                                act=cfg.arch.world_model.reward.act)
     self.reward = DenseTransformerDecoder(cfg, dense_input_size, cfg.arch.world_model.reward.layers, cfg.arch.world_model.reward.num_units, (1,),
                                act=cfg.arch.world_model.reward.act)
@@ -297,7 +299,8 @@ class TransformerDynamic(nn.Module):
     self.stoch_mlp = Linear(latent_dim, self.d_model, weight_init=weight_init)
     self.q_trans = cfg.arch.q_trans
     self.q_emb_action = cfg.arch.world_model.q_emb_action
-    q_emb_size = cfg.arch.world_model.input.params.slot.dim if cfg.arch.world_model.input.type == 'slot' else 1536
+    slot_extractor_cfg = OmegaConf.load(cfg.arch.world_model.slot_extractor.config_path)
+    q_emb_size = slot_extractor_cfg.slotattr.slot_size if cfg.arch.world_model.input.type == 'slot' else 1536
     if self.q_emb_action:
       q_emb_size = q_emb_size + action_size
 

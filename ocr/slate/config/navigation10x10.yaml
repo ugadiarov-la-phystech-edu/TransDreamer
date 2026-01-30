@@ -1,0 +1,35 @@
+name: 'SLATE'
+tau_start: 1.0
+tau_final: 0.1
+tau_steps: 30000
+hard: False
+use_cnn_feat: False
+use_bcdec: False
+
+dvae:
+  vocab_size: 32
+  d_model: 128
+
+cnn:
+  hidden_size: 64
+
+slotattr:
+  num_iterations: 5
+  num_slots: 9
+  num_slot_heads: 1
+  slot_size: 64
+  mlp_hidden_size: 256
+  pos_channels: 8
+
+tfdec:
+  num_dec_blocks: 4
+  num_dec_heads: 4
+
+learning:
+  lr_half_life: 250000
+  lr_dvae: 3e-4
+  lr_enc: 1e-4
+  lr_dec: 3e-4
+  lr_warmup_steps: 30000
+  dropout: 0.1
+  clip: 0.05
