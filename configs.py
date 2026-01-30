@@ -42,7 +42,13 @@ cfg = CN(
                 "temp_start": 2.0,
                 "temp_end": 0.001,
                 "temp_decay_steps": 1e6,
-                "input_type": "image",
+                "input": {
+                    "type": "image", # or "slot"
+                    "params": {
+                        "image": {},
+                        "slot": {"n_slot": 3, "dim": 7},
+                    },
+                },
                 "train_wm_steps": 1,
                 "transformer": {
                     "max_time": 2000,
@@ -106,6 +112,25 @@ cfg = CN(
                 },
             },
             "decoder": {"dec_type": "conv",},
+            'aggregation_transformer': {
+                "max_time": 2000,
+                "num_heads": 8,
+                "d_model": -1, # set in code
+                "d_inner": 64,
+                "d_ff_inner": 1024,
+                "dropout": 0.1,
+                "dropatt": 0.1,
+                "activation": "relu",
+                "pos_enc": "temporal",
+                "embedding_type": "linear",
+                "n_layers": -1, # set in code
+                "pre_lnorm": True,
+                "deter_type": "last_layer",
+                "gating": False,
+                "last_ln": False,
+                "enc_pos": False,
+                "warm_up": False,
+            },
         },
         "loss": {
             "pcont_scale": 5.0,

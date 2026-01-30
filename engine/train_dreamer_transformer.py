@@ -8,7 +8,7 @@ from torch.utils.tensorboard import SummaryWriter
 from torchvision import utils as vutils
 from utils import Checkpointer
 from solver import get_optimizer
-from envs import make_env, count_steps, BatchEnv, count_episodes, summarize
+from envs import make_env, count_steps, BatchEnv, count_episodes, summarize, SlotBatchEnv, tools
 from data import EnvIterDataset
 from torch.utils.data import DataLoader
 from torch.cuda.amp import GradScaler, autocast
@@ -57,7 +57,7 @@ def simulate_test(model, test_env, cfg, global_step, device):
   action_list[:, 0, 0] = 1. # B, T, C
   state = None
   done = False
-  input_type = cfg.arch.world_model.input_type
+  input_type = cfg.arch.world_model.input.type
 
   with torch.no_grad():
     while not done:
@@ -111,12 +111,14 @@ def train(model, cfg, device):
 
   datadir = os.path.join(cfg.data.datadir, cfg.exp_name, cfg.env.name, cfg.run_id, 'train_episodes')
   test_datadir = os.path.join(cfg.data.datadir, cfg.exp_name, cfg.env.name, cfg.run_id, 'test_episodes')
-  train_env = BatchEnv(
+  train_env = SlotBatchEnv(
       [partial(make_env, cfg, datadir, store=True, seed=i) for i in range(cfg.env.n_envs)],
-      input_type=cfg.arch.world_model.input_type, parallel=cfg.env.parallel, device=device)
-  test_env = BatchEnv([partial(make_env, cfg, test_datadir, store=True, seed=i + cfg.env.n_envs)
-                       for i in range(cfg.env.n_envs_eval)], input_type = cfg.arch.world_model.input_type,
-                       parallel=cfg.env.parallel, device=device)
+      input_type=cfg.arch.world_model.input.type, parallel=cfg.env.parallel, device=device,
+      on_episode_end=lambda ep, env_id: tools.save_episodes(datadir, [ep], env_id=env_id))
+  test_env = SlotBatchEnv([partial(make_env, cfg, test_datadir, store=True, seed=i + cfg.env.n_envs)
+                       for i in range(cfg.env.n_envs_eval)], input_type=cfg.arch.world_model.input.type,
+                       parallel=cfg.env.parallel, device=device,
+      on_episode_end=lambda ep, env_id: tools.save_episodes(test_datadir, [ep], env_id=env_id))
 
   # fill in length of 5000 frames
   train_env.reset()
@@ -137,13 +139,17 @@ def train(model, cfg, device):
   global_step = max(global_step, steps)
 
   obss = train_env.reset()
-  state = {'stoch': torch.zeros(train_env.n_envs, cfg.train.batch_length, cfg.arch.world_model.RSSM.stoch_discrete, cfg.arch.world_model.RSSM.stoch_size, device=device)}
+  state_shape = (train_env.n_envs, cfg.train.batch_length, cfg.arch.world_model.RSSM.stoch_discrete, cfg.arch.world_model.RSSM.stoch_size)
+  if cfg.arch.world_model.input.type == 'slot':
+      state_shape = (train_env.n_envs, cfg.train.batch_length, cfg.arch.world_model.input.params.slot.n_slot,
+                     cfg.arch.world_model.RSSM.stoch_discrete, cfg.arch.world_model.RSSM.stoch_size)
+  state = {'stoch': torch.zeros(*state_shape, device=device)}
   state['logits'] = torch.zeros_like(state['stoch'])
   state['padding'] = torch.ones(train_env.n_envs, cfg.train.batch_length, device=device)
   action_list = torch.zeros(train_env.n_envs, cfg.train.batch_length - 1, cfg.env.action_size).float() # B, T, C
   action_list[:, -1, 0] = 1. # always start episode with this action
   done_env_ids = torch.arange(train_env.n_envs, device=device)
-  input_type = cfg.arch.world_model.input_type
+  input_type = cfg.arch.world_model.input.type
   temp = cfg.arch.world_model.temp_start
   next_train_step = global_step
   next_log_step = global_step

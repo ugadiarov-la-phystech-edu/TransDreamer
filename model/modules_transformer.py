@@ -1,3 +1,4 @@
+import copy
 import math
 
 from torch.distributions.bernoulli import Bernoulli
@@ -10,7 +11,7 @@ import torch.nn.functional as F
 from torch.distributions import kl_divergence, RelaxedOneHotCategorical
 from .distributions import SafeTruncatedNormal, ContDist
 from .utils import Conv2DBlock, ConvTranspose2DBlock, Linear, MLP, GRUCell, LayerNormGRUCell, LayerNormGRUCellV2
-from .transformer import Transformer
+from .transformer import Transformer, AggregationTransformer
 from collections import defaultdict
 import numpy as np
 import pdb
@@ -37,11 +38,12 @@ class TransformerWorldModel(nn.Module):
     else:
       dense_input_size = d_model + self.stoch_size
 
-    self.img_dec = ImgDecoder(cfg, dense_input_size)
-    self.reward = DenseDecoder(dense_input_size, cfg.arch.world_model.reward.layers, cfg.arch.world_model.reward.num_units, (1,),
+    self.img_dec = DenseDecoder(dense_input_size, cfg.arch.world_model.reward.layers, cfg.arch.world_model.reward.num_units, (cfg.arch.world_model.input.params.slot.dim,),
+                               act=cfg.arch.world_model.reward.act)
+    self.reward = DenseTransformerDecoder(cfg, dense_input_size, cfg.arch.world_model.reward.layers, cfg.arch.world_model.reward.num_units, (1,),
                                act=cfg.arch.world_model.reward.act)
 
-    self.pcont = DenseDecoder(dense_input_size, cfg.arch.world_model.pcont.layers, cfg.arch.world_model.pcont.num_units, (1,),
+    self.pcont = DenseTransformerDecoder(cfg, dense_input_size, cfg.arch.world_model.pcont.layers, cfg.arch.world_model.pcont.num_units, (1,),
                               dist='binary', act='elu')
 
     self.r_transform = dict(
@@ -69,7 +71,7 @@ class TransformerWorldModel(nn.Module):
     self.imag_last_T = cfg.train.imag_last_T
     self.slow_update_step = cfg.slow_update_step
     self.log_grad = cfg.train.log_grad
-    self.input_type = cfg.arch.world_model.input_type
+    self.input_type = cfg.arch.world_model.input.type
 
   def forward(self, traj):
     raise NotImplementedError
@@ -90,7 +92,6 @@ class TransformerWorldModel(nn.Module):
   def world_model_loss(self, global_step, traj, prior_state, post_state, temp, do_log=True):
 
     obs = traj[self.input_type]
-    obs = obs / 255. - 0.5
     reward = traj['reward']
     reward = self.r_transform(reward).float()
 
@@ -115,9 +116,9 @@ class TransformerWorldModel(nn.Module):
     discount_acc = ((pred_pcont.mean == pcont_target.unsqueeze(2)).float().squeeze(-1) * not_pad_mask).sum(-1) / not_pad_mask.sum(-1)
     discount_acc = discount_acc.mean()
 
-    image_pred_loss = -(image_pred_pdf.log_prob(obs[:, 1:]) * not_pad_mask).sum(-1) / not_pad_mask.sum(-1)
+    image_pred_loss = -(image_pred_pdf.log_prob(obs[:, 1:]).mean(dim=2) * not_pad_mask).sum(-1) / not_pad_mask.sum(-1)
     image_pred_loss = image_pred_loss.mean()
-    mse_loss = (F.mse_loss(image_pred_pdf.mean, obs[:, 1:], reduction='none').flatten(start_dim=-3).sum(-1) * not_pad_mask).sum(-1) / not_pad_mask.sum(-1)
+    mse_loss = (F.mse_loss(image_pred_pdf.mean, obs[:, 1:], reduction='none').flatten(start_dim=2).mean(dim=-1) * not_pad_mask).sum(-1) / not_pad_mask.sum(-1)
     mse_loss = mse_loss.mean()
     reward_pred_loss = -(reward_pred_pdf.log_prob(reward[:, 1:].unsqueeze(2)) * not_pad_mask).sum(-1) / not_pad_mask.sum(-1) # B
     reward_pred_loss = reward_pred_loss.mean()
@@ -128,8 +129,8 @@ class TransformerWorldModel(nn.Module):
 
     value_lhs = kl_divergence(post_dist, self.dynamic.get_dist(prior_state, temp, detach=True)) # B, T
     value_rhs = kl_divergence(self.dynamic.get_dist(post_state_trimed, temp, detach=True), prior_dist)
-    value_lhs = (value_lhs * not_pad_mask).sum(-1) / not_pad_mask.sum(-1)
-    value_rhs = (value_rhs * not_pad_mask).sum(-1) / not_pad_mask.sum(-1)
+    value_lhs = (value_lhs.mean(-1) * not_pad_mask).sum(-1) / not_pad_mask.sum(-1)
+    value_rhs = (value_rhs.mean(-1) * not_pad_mask).sum(-1) / not_pad_mask.sum(-1)
     loss_lhs = torch.maximum(value_lhs.mean(), value_lhs.new_ones(value_lhs.mean().shape) * self.free_nats)
     loss_rhs = torch.maximum(value_rhs.mean(), value_rhs.new_ones(value_rhs.mean().shape) * self.free_nats)
 
@@ -281,7 +282,7 @@ class TransformerDynamic(nn.Module):
     self.pre_lnorm = cfg.arch.world_model.transformer.pre_lnorm
     self.act_after_emb = cfg.arch.world_model.act_after_emb
 
-    self.img_enc = ImgEncoder(cfg)
+    self.img_enc = nn.Identity()
 
     weight_init = cfg.arch.world_model.RSSM.weight_init
     self.cell = Transformer(cfg.arch.world_model.transformer)
@@ -292,10 +293,11 @@ class TransformerDynamic(nn.Module):
     else:
       latent_dim = self.stoch_size
       latent_dim_out = latent_dim * 2
-    self.act_stoch_mlp = Linear(action_size + latent_dim, self.d_model, weight_init=weight_init)
+    self.act_mlp = Linear(action_size, self.d_model, weight_init=weight_init)
+    self.stoch_mlp = Linear(latent_dim, self.d_model, weight_init=weight_init)
     self.q_trans = cfg.arch.q_trans
     self.q_emb_action = cfg.arch.world_model.q_emb_action
-    q_emb_size = 1536
+    q_emb_size = cfg.arch.world_model.input.params.slot.dim if cfg.arch.world_model.input.type == 'slot' else 1536
     if self.q_emb_action:
       q_emb_size = q_emb_size + action_size
 
@@ -325,7 +327,7 @@ class TransformerDynamic(nn.Module):
     else:
       d_model = self.d_model
     self.prior_stoch_mlp = MLP([d_model, hidden_size, latent_dim_out], act=act, weight_init=weight_init)
-    self.input_type = cfg.arch.world_model.input_type
+    self.input_type = cfg.arch.world_model.input.type
 
   def forward(self, traj, prev_state, temp):
     """
@@ -437,28 +439,31 @@ class TransformerDynamic(nn.Module):
 
   def infer_prior_stoch(self, prev_stoch, temp, actions, pad_mask):
 
-    B, T = prev_stoch.shape[:2]
+    B, T, n_slot, N, C = prev_stoch.shape
     if self.stoch_discrete:
-      B, T, N, C = prev_stoch.shape
+      stoch_emb = self.stoch_mlp(prev_stoch.reshape(B, T, n_slot, N * C))
+      act_emb = self.act_mlp(actions)
 
-      act_sto_emb = self.encode_s(prev_stoch, actions)
+      # append action embedding as a slot
+      act_sto_emb = torch.cat([stoch_emb, act_emb.unsqueeze(-2)], dim=-2) # B, T, (n_slot + 1), d_model
     else:
       act_sto_emb = self.act_stoch_mlp(torch.cat([prev_stoch, actions], dim=-1))
       act_sto_emb = F.elu(act_sto_emb)
 
-    s_t_reshape = act_sto_emb.reshape(B, T, -1, 1, 1)
-    o_t = self.cell(s_t_reshape, None, pad_mask) # B, T, L, D, H, W
+    s_t_reshape = act_sto_emb.unsqueeze(-1).unsqueeze(-1)
+    o_t = self.cell(s_t_reshape, None, pad_mask) # B, T, (n_slot + 1), L, D, H, W
 
-    o_t = o_t.reshape(B, T, self.n_layers, -1)
+    o_t = o_t.reshape(B, T, self.n_layers, n_slot + 1, -1)
+    o_t = o_t[:, :, :, :-1] # cut off action slot
     if self.deter_type == 'concat_o':
       deter = o_t.reshape(B, T, -1)
     else:
       deter = o_t[:, :, -1]
+
     pred_logits = self.prior_stoch_mlp(deter).float()
 
     if self.stoch_discrete:
-      B, T, N, C = prev_stoch.shape
-      pred_logits = pred_logits.reshape(B, T, N, C)
+      pred_logits = pred_logits.reshape(*pred_logits.shape[:-1], N, C)
 
     prior_state = self.stat_layer(pred_logits, temp)
     prior_state.update({
@@ -472,7 +477,7 @@ class TransformerDynamic(nn.Module):
 
     if action is not None:
       observation = torch.cat([observation, action], dim=-1)
-    B, T, C = observation.shape
+    B, T = observation.shape[:2]
     if self.q_trans:
       q_emb = self.q_emb(observation)
       e = self.q_trans_model(q_emb.reshape(B, T, self.d_model, 1, 1), None)
@@ -488,7 +493,7 @@ class TransformerDynamic(nn.Module):
       logits = self.post_stoch_mlp(observation).float()
 
     if self.stoch_discrete:
-      logits = logits.reshape(B, T, self.stoch_discrete, self.stoch_size).float()
+      logits = logits.reshape(*logits.shape[:-1], self.stoch_discrete, self.stoch_size).float()
     post_state = self.stat_layer(logits, temp)
 
     return post_state
@@ -566,7 +571,7 @@ class ImgEncoder(nn.Module):
     ipts: tensor, (B, T, 3, 64, 64)
     return: tensor, (B, T, 1024)
     """
-
+    ipts = ipts / 255. - 0.5
     shapes = ipts.shape
     o = self.enc(ipts.view([-1] + [*shapes[-3:]]))
     o = o.view((o.shape[0], -1))
@@ -641,7 +646,7 @@ class DenseDecoder(nn.Module):
       module_list.append(Linear(dim_in, dim_out, weight_init=weight_init))
       module_list.append(acts[act]())
 
-    module_list.append(Linear(dim_out, 1, weight_init=weight_init))
+    module_list.append(Linear(dim_out, output_shape[0], weight_init=weight_init))
     self.dec = nn.Sequential(*module_list)
 
     self.dist = dist
@@ -663,6 +668,39 @@ class DenseDecoder(nn.Module):
       raise NotImplementedError(self.dist)
 
     return pdf
+
+
+class DenseTransformerDecoder(nn.Module):
+
+  def __init__(self, cfg, input_size, layers, units, output_shape, weight_init='xavier', dist='normal', act='relu'):
+    super().__init__()
+
+    aggregation_transformer_cfg = copy.deepcopy(cfg.arch.aggregation_transformer)
+    aggregation_transformer_cfg.d_model = input_size
+    aggregation_transformer_cfg.n_layers = layers
+    self.aggregation_transformer = AggregationTransformer(aggregation_transformer_cfg)
+    self.linear = Linear(input_size, output_shape[0], weight_init=weight_init)
+
+    self.dist = dist
+    self.output_shape = output_shape
+
+  def forward(self, inpts):
+    z = self.aggregation_transformer(inpts)
+    logits = self.linear(z)
+    logits = logits.float()
+
+    if self.dist == 'normal':
+      pdf = Independent(Normal(logits, 1), len(self.output_shape))
+
+
+    elif self.dist == 'binary':
+      pdf = Independent(Bernoulli(logits=logits), len(self.output_shape))
+
+    else:
+      raise NotImplementedError(self.dist)
+
+    return pdf
+
 
 class ActionDecoder(nn.Module):
 
@@ -722,6 +760,47 @@ class ActionDecoder(nn.Module):
       dist = OneHotCategorical(logits=logits)
 
     return dist
+
+
+class ActionTransformerDecoder(nn.Module):
+  def __init__(self, cfg, input_size, action_size, layers, units, dist='onehot', act='relu',
+                min_std=0.1, init_std=5, mean_scale=5, weight_init='xavier'):
+    super().__init__()
+    aggregation_transformer_cfg = copy.deepcopy(cfg.arch.aggregation_transformer)
+    aggregation_transformer_cfg.d_model = input_size
+    aggregation_transformer_cfg.n_layers = layers
+    self.aggregation_transformer = AggregationTransformer(aggregation_transformer_cfg)
+    if dist == 'trunc_normal':
+      self.linear = Linear(input_size, 2 * action_size, weight_init=weight_init)
+    elif dist == 'onehot':
+      self.linear = Linear(input_size, action_size, weight_init=weight_init)
+    else:
+      raise NotImplementedError(self.dist)
+
+    self.dist = dist
+    self.raw_init_std = np.log(np.exp(init_std) - 1)
+    self.min_std = min_std
+    self.mean_scale = mean_scale
+
+  def forward(self, inpts):
+    z = self.aggregation_transformer(inpts)
+    logits = self.linear(z)
+    logits = logits.float()
+
+    if self.dist == 'trunc_normal':
+
+      mean, std = torch.chunk(logits, 2, -1)
+      mean = torch.tanh(mean)
+      std = 2 * torch.sigmoid(std / 2) + self.min_std
+      dist = SafeTruncatedNormal(mean, std, -1, 1)
+      dist = ContDist(Independent(dist, 1))
+
+    if self.dist == 'onehot':
+
+      dist = OneHotCategorical(logits=logits)
+
+    return dist
+
 
 class MyRelaxedOneHotCategorical(RelaxedOneHotCategorical):
   def __init__(self, temp, logits, eps=1e-16, validate_args=False):

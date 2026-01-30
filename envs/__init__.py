@@ -98,10 +98,7 @@ def make_env(cfg, datadir, store, seed=0):
 
   env = TimeLimit(env, cfg.env.time_limit, cfg.env.time_penalty)
 
-  callbacks = []
-  if store:
-    callbacks.append(lambda ep: tools.save_episodes(datadir, [ep], env_id=seed))
-  env = Collect(env, callbacks, cfg.env.precision)
+  env = Collect(env, callbacks=None, precision=cfg.env.precision)
   env = RewardObs(env)
 
   return env
@@ -234,3 +231,60 @@ class BatchEnv:
     idx = np.random.randint(0, self.action_space.n, size=(n_envs,))
     action[np.arange(n_envs), idx] = 1
     return action
+
+
+class SlotBatchEnv(BatchEnv):
+  def __init__(self, make_env_fns, parallel, input_type, on_episode_end, device='cpu'):
+    super(SlotBatchEnv, self).__init__(make_env_fns, parallel, 'image', device)
+    assert input_type == 'slot', f'{input_type} != slot'
+    self.device = device
+    self.slot_input_type = input_type
+    self.n_slot = 3
+    self.dim = 8
+    self.on_episode_end = on_episode_end
+    self._episode_slots = [None] * self.n_envs
+
+    import gym
+    self.observation_space = gym.spaces.Dict({
+        'slot': gym.spaces.Box(low=0, high=255, shape=(self.n_slot, self.dim), dtype=np.float32),
+        'reward': self.observation_space['reward'],
+    })
+
+  def _generate_slots(self, env_ids=None):
+    env_ids = range(self.n_envs) if env_ids is None else env_ids
+    obss = [self.observation_space.sample() for _ in env_ids]
+    obss = {k: [o[k] for o in obss] for k in obss[0]}
+    slot = torch.as_tensor(np.stack(obss[self.slot_input_type], axis=0), device=self.device)
+
+    return slot
+
+  def reset(self, env_ids=None):
+    obs = super(SlotBatchEnv, self).reset(env_ids)
+    slots = self._generate_slots(env_ids)
+    env_ids = range(self.n_envs) if env_ids is None else env_ids
+    for i, env_id in enumerate(env_ids):
+      self._episode_slots[env_id] = [slots[i]]
+
+    del obs['image']
+    obs[self.slot_input_type] = slots
+
+    return obs
+
+  def step(self, acts):
+    obss, rewards, dones, infos = super(SlotBatchEnv, self).step(acts)
+    slots = self._generate_slots()
+    for i in range(self.n_envs):
+      self._episode_slots[i].append(slots[i])
+
+    for i, done in enumerate(dones):
+      if done:
+        episode = infos[i]['episode']
+        infos[i]['episode'] = episode.pop('stats')
+        del episode['image']
+        episode['slot'] = torch.stack(self._episode_slots[i]).detach().cpu().numpy()
+        self.on_episode_end(episode, i)
+
+    del obss['image']
+    obss[self.slot_input_type] = slots
+
+    return obss, rewards, dones, infos

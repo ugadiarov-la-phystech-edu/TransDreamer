@@ -147,7 +147,8 @@ class Collect:
     if done:
       episode = {k: [t[k] for t in self._episode] for k in self._episode[0]}
       episode = {k: self._convert(v) for k, v in episode.items()}
-      info['episode'] = {'length': len(episode['reward']) - 1, 'return': episode['reward'].sum()}
+      episode['stats'] = {'length': len(episode['reward']) - 1, 'return': episode['reward'].sum()}
+      info['episode'] = episode
       for callback in self._callbacks:
         callback(episode)
     obs['image'] = obs['image'][None,...]

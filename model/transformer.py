@@ -206,7 +206,7 @@ class Transformer(nn.Module):
     self.drop = torch.nn.Dropout(dropout)
 
     self.layers = torch.nn.ModuleList(
-      [TransformerEncoderLayer(cfg) for _ in range(n_layers)]
+      [OCDynamicsLayer(cfg) for _ in range(n_layers)]
     )
 
     if self.last_ln:
@@ -234,7 +234,7 @@ class Transformer(nn.Module):
       return (prefix_zeros - 1) * zeros_mask
 
   def forward(self, z, actions, pad_mask):
-    B, T, D, H, W = z.shape
+    B, T, n_slot, D, H, W = z.shape
 
     attn_mask = self._generate_square_subsequent_mask(H, W, z.device, pad_mask) # T, T
 
@@ -244,8 +244,8 @@ class Transformer(nn.Module):
 
     if actions is None:
 
-      z = rearrange(z, 'b t d h w -> (t h w) b d')
-      encoder_inp = z + pos_embs.permute(1, 0, 2)
+      z = rearrange(z, 'b t s d h w -> s (t h w) b d')
+      encoder_inp = z + pos_embs.permute(1, 0, 2).unsqueeze(0).expand(n_slot, -1, -1, -1)
 
     else:
       z = rearrange(z, 'b t d h w -> (t h w) b d')
@@ -265,10 +265,48 @@ class Transformer(nn.Module):
 
       output_list.append(output)
 
-    output = torch.stack(output_list, dim=1) # T, L, B, D
+    output = torch.stack(output_list, dim=2) # n_slot, T, L, B, D
 
     output = rearrange(output,
-                       '(t h w) l b d -> b t l d h w',
+                       's (t h w) l b d -> b t l s d h w',
                        h=H, w=W)
     return output
 
+
+class AggregationTransformer(Transformer):
+  def __init__(self, cfg):
+    super(AggregationTransformer, self).__init__(cfg)
+    self.aggregation_slot = torch.nn.Parameter(torch.randn(1, 1, 1, cfg.d_model))
+
+  def forward(self, z, actions=None, pad_mask=None):
+    B, T, n_slot, D = z.shape
+    z = torch.concat([z, self.aggregation_slot.expand(B, T, -1, -1)], dim=2)
+    z = z.reshape(B, T, n_slot + 1, D, 1, 1)
+    pad_mask = torch.zeros(B, T, device=z.device)
+    z = super(AggregationTransformer, self).forward(z, actions, pad_mask)
+
+    return z[:, :, -1, -1, :, 0, 0]
+
+
+class OCDynamicsLayer(nn.Module):
+
+  def __init__(self, cfg):
+    super().__init__()
+    self.object_encoder_layer = TransformerEncoderLayer(cfg)
+    self.time_encoder_layer = TransformerEncoderLayer(cfg)
+
+  def forward(self, x, attn_mask=None):
+    n_slot, T, B, D = x.shape
+
+    x = x.reshape(n_slot, T * B, D)
+    x = self.object_encoder_layer(x, attn_mask=None)
+    x = x.reshape(n_slot, T, B, D)
+
+    x = x.permute(1, 2, 0, 3) # T, B, n_slot, D
+    x = x.reshape(T, B * n_slot, D)
+    attn_mask = attn_mask.unsqueeze(-1).expand(T, T, B, n_slot).reshape(T, T, B * n_slot)
+    x = self.time_encoder_layer(x, attn_mask=attn_mask)
+    x = x.reshape(T, B, n_slot, D)
+    x = x.permute(2, 0, 1, 3)
+
+    return x

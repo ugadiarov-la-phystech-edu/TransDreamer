@@ -1,7 +1,8 @@
 from collections import defaultdict
 from torch.distributions.one_hot_categorical import OneHotCategorical
 from torch.distributions import Independent
-from .modules_transformer import TransformerWorldModel, DenseDecoder, ActionDecoder
+from .modules_transformer import TransformerWorldModel, DenseDecoder, ActionDecoder, ActionTransformerDecoder, \
+    DenseTransformerDecoder
 import torch
 import torch.nn as nn
 import pdb
@@ -28,11 +29,11 @@ class TransDreamer(nn.Module):
     self.aggregator = cfg.arch.actor.aggregator
     if self.aggregator == 'attn':
       dense_input_size = dense_input_size + self.d_model
-    self.actor = ActionDecoder(dense_input_size, cfg.env.action_size, cfg.arch.actor.layers, cfg.arch.actor.num_units,
-                               dist=cfg.arch.actor.dist, init_std=cfg.arch.actor.init_std, act=cfg.arch.actor.act)
+    self.actor = ActionTransformerDecoder(cfg, dense_input_size, cfg.env.action_size, cfg.arch.actor.layers, cfg.arch.actor.num_units,
+                                dist=cfg.arch.actor.dist, init_std=cfg.arch.actor.init_std, act=cfg.arch.actor.act)
 
-    self.value = DenseDecoder(dense_input_size, cfg.arch.value.layers, cfg.arch.value.num_units, (1,), act=cfg.arch.value.act)
-    self.slow_value = DenseDecoder(dense_input_size, cfg.arch.value.layers, cfg.arch.value.num_units, (1,), act=cfg.arch.value.act)
+    self.value = DenseTransformerDecoder(cfg, dense_input_size, cfg.arch.value.layers, cfg.arch.value.num_units, (1,), act=cfg.arch.value.act)
+    self.slow_value = DenseTransformerDecoder(cfg, dense_input_size, cfg.arch.value.layers, cfg.arch.value.num_units, (1,), act=cfg.arch.value.act)
 
     self.discount = cfg.rl.discount
     self.lambda_ = cfg.rl.lambda_
@@ -70,12 +71,14 @@ class TransDreamer(nn.Module):
 
     rec_img = logs['dec_img']
     gt_img = logs['gt_img']  # B, {1:T}, C, H, W
-    combined = torch.cat([gt_img[:4], rec_img[:4]], dim=-2).clamp(0., 1.).cpu()
-    sizes = [-1] * len(combined.shape)
-    sizes[-3] = 3
-    combined = combined.expand(sizes)
+    if len(gt_img.shape) == 5:
+      # video
+      combined = torch.cat([gt_img[:4], rec_img[:4]], dim=-2).clamp(0., 1.).cpu()
+      sizes = [-1] * len(combined.shape)
+      sizes[-3] = 3
+      combined = combined.expand(sizes)
 
-    writer.add_video('train/rec - gt', combined, global_step=global_step)
+      writer.add_video('train/rec - gt', combined, global_step=global_step)
 
     for k, v in logs.items():
 
@@ -240,13 +243,13 @@ class TransDreamer(nn.Module):
     :param prior:
     :return:
     """
-    obs = obs.unsqueeze(1) / 255. - 0.5 # B, T, C, H, W
+    obs = obs.unsqueeze(1) # B, T, C, H, W
     obs_emb = self.world_model.dynamic.img_enc(obs) # B, T, C
     post = self.world_model.dynamic.infer_post_stoch(obs_emb, temp, action=None) # B, T, N, C
 
     if done_env_ids.shape[0] > 0:
       # initialize state for new episodes
-      prev_obs = prev_obs[done_env_ids].unsqueeze(1) / 255. - 0.5
+      prev_obs = prev_obs[done_env_ids].unsqueeze(1)
       prev_obs_emb = self.world_model.dynamic.img_enc(prev_obs)  # B, T, C
       prev_post = self.world_model.dynamic.infer_post_stoch(prev_obs_emb, temp, action=None)  # B, T, N, C
 
