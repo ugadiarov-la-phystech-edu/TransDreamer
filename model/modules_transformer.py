@@ -155,7 +155,7 @@ class TransformerWorldModel(nn.Module):
         'ACT_post_state': {k: v.detach() for k, v in post_state.items()},
         'ACT_post_entropy': post_dist.entropy().mean().detach().item(),
         'ACT_gt_reward': reward[:, 1:],
-        'dec_img': (image_pred_pdf.mean.detach() + 0.5),  # B, T, 3, 64, 64
+        'dec_img': image_pred_pdf.detach(),  # B, T, 3, 64, 64
         'gt_img': obs[:, 1:] + 0.5,
         'reward_input': rnn_feature.detach(),
         'model_discount_logprob_loss': pcont_loss.detach().item(),
