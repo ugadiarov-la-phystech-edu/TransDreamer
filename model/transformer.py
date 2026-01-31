@@ -206,7 +206,7 @@ class Transformer(nn.Module):
     self.drop = torch.nn.Dropout(dropout)
 
     self.layers = torch.nn.ModuleList(
-      [OCDynamicsLayer(cfg) for _ in range(n_layers)]
+      [TransformerEncoderLayer(cfg) for _ in range(n_layers)]
     )
 
     if self.last_ln:
@@ -237,15 +237,19 @@ class Transformer(nn.Module):
     B, T, n_slot, D, H, W = z.shape
 
     attn_mask = self._generate_square_subsequent_mask(H, W, z.device, pad_mask) # T, T
+    attn_mask = attn_mask.repeat_interleave(n_slot, dim=1).repeat_interleave(n_slot, dim=2)
 
     # (T, 1, d_model)
     pos_ips = self.masked_position(pad_mask)
     pos_embs = self.drop(self.pos_embs(pos_ips))
+    pos_embs = pos_embs.repeat_interleave(n_slot, dim=1)
+
+    z = z.reshape(B, T * n_slot, D, H, W)
 
     if actions is None:
 
-      z = rearrange(z, 'b t s d h w -> s (t h w) b d')
-      encoder_inp = z + pos_embs.permute(1, 0, 2).unsqueeze(0).expand(n_slot, -1, -1, -1)
+      z = rearrange(z, 'b t d h w -> (t h w) b d')
+      encoder_inp = z + pos_embs.permute(1, 0, 2)
 
     else:
       z = rearrange(z, 'b t d h w -> (t h w) b d')
@@ -265,11 +269,12 @@ class Transformer(nn.Module):
 
       output_list.append(output)
 
-    output = torch.stack(output_list, dim=2) # n_slot, T, L, B, D
+    output = torch.stack(output_list, dim=1) # n_slot * T, L, B, D
 
     output = rearrange(output,
-                       's (t h w) l b d -> b t l s d h w',
+                       '(t h w) l b d -> b t l d h w',
                        h=H, w=W)
+    output = output.reshape(B, T, n_slot, *output.shape[2:])
     return output
 
 

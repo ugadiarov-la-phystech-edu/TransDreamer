@@ -41,7 +41,7 @@ class TransformerWorldModel(nn.Module):
 
     slot_extractor_cfg = OmegaConf.load(cfg.arch.world_model.slot_extractor.config_path)
     self.img_dec = DenseDecoder(dense_input_size, cfg.arch.world_model.reward.layers, cfg.arch.world_model.reward.num_units, (slot_extractor_cfg.slotattr.slot_size,),
-                               act=cfg.arch.world_model.reward.act, dist='mse')
+                               act=cfg.arch.world_model.reward.act)
     self.reward = DenseDecoder(dense_input_size, cfg.arch.world_model.reward.layers, cfg.arch.world_model.reward.num_units, (1,),
                                act=cfg.arch.world_model.reward.act, aggregate_slots=True)
 
@@ -118,9 +118,10 @@ class TransformerWorldModel(nn.Module):
     discount_acc = ((pred_pcont.mean == pcont_target.unsqueeze(2)).float().squeeze(-1) * not_pad_mask).sum(-1) / not_pad_mask.sum(-1)
     discount_acc = discount_acc.mean()
 
-    image_pred_loss = (F.mse_loss(image_pred_pdf, obs[:, 1:], reduction='none').flatten(start_dim=2).mean(dim=-1) * not_pad_mask).sum(-1) / not_pad_mask.sum(-1)
+    image_pred_loss = -(image_pred_pdf.log_prob(obs[:, 1:]).mean(dim=2) * not_pad_mask).sum(-1) / not_pad_mask.sum(-1)
     image_pred_loss = image_pred_loss.mean()
-    mse_loss = image_pred_loss
+    mse_loss = (F.mse_loss(image_pred_pdf.mean, obs[:, 1:], reduction='none').flatten(start_dim=2).mean(dim=-1) * not_pad_mask).sum(-1) / not_pad_mask.sum(-1)
+    mse_loss = mse_loss.mean()
     reward_pred_loss = -(reward_pred_pdf.log_prob(reward[:, 1:].unsqueeze(2)) * not_pad_mask).sum(-1) / not_pad_mask.sum(-1) # B
     reward_pred_loss = reward_pred_loss.mean()
     pred_reward = reward_pred_pdf.mean
@@ -155,7 +156,7 @@ class TransformerWorldModel(nn.Module):
         'ACT_post_state': {k: v.detach() for k, v in post_state.items()},
         'ACT_post_entropy': post_dist.entropy().mean().detach().item(),
         'ACT_gt_reward': reward[:, 1:],
-        'dec_img': image_pred_pdf.detach(),  # B, T, 3, 64, 64
+        'dec_img': (image_pred_pdf.mean.detach() + 0.5),  # B, T, 3, 64, 64
         'gt_img': obs[:, 1:] + 0.5,
         'reward_input': rnn_feature.detach(),
         'model_discount_logprob_loss': pcont_loss.detach().item(),
