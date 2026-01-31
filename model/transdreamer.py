@@ -32,8 +32,8 @@ class TransDreamer(nn.Module):
     self.actor = ActionTransformerDecoder(cfg, dense_input_size, cfg.env.action_size, cfg.arch.actor.layers, cfg.arch.actor.num_units,
                                 dist=cfg.arch.actor.dist, init_std=cfg.arch.actor.init_std, act=cfg.arch.actor.act)
 
-    self.value = DenseTransformerDecoder(cfg, dense_input_size, cfg.arch.value.layers, cfg.arch.value.num_units, (1,), act=cfg.arch.value.act)
-    self.slow_value = DenseTransformerDecoder(cfg, dense_input_size, cfg.arch.value.layers, cfg.arch.value.num_units, (1,), act=cfg.arch.value.act)
+    self.value = DenseDecoder(dense_input_size, cfg.arch.value.layers, cfg.arch.value.num_units, (1,), act=cfg.arch.value.act, aggregate_slots=True)
+    self.slow_value = DenseDecoder(dense_input_size, cfg.arch.value.layers, cfg.arch.value.num_units, (1,), act=cfg.arch.value.act, aggregate_slots=True)
 
     self.discount = cfg.rl.discount
     self.lambda_ = cfg.rl.lambda_

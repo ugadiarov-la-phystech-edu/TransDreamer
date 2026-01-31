@@ -41,12 +41,12 @@ class TransformerWorldModel(nn.Module):
 
     slot_extractor_cfg = OmegaConf.load(cfg.arch.world_model.slot_extractor.config_path)
     self.img_dec = DenseDecoder(dense_input_size, cfg.arch.world_model.reward.layers, cfg.arch.world_model.reward.num_units, (slot_extractor_cfg.slotattr.slot_size,),
-                               act=cfg.arch.world_model.reward.act)
-    self.reward = DenseTransformerDecoder(cfg, dense_input_size, cfg.arch.world_model.reward.layers, cfg.arch.world_model.reward.num_units, (1,),
-                               act=cfg.arch.world_model.reward.act)
+                               act=cfg.arch.world_model.reward.act, dist='mse')
+    self.reward = DenseDecoder(dense_input_size, cfg.arch.world_model.reward.layers, cfg.arch.world_model.reward.num_units, (1,),
+                               act=cfg.arch.world_model.reward.act, aggregate_slots=True)
 
-    self.pcont = DenseTransformerDecoder(cfg, dense_input_size, cfg.arch.world_model.pcont.layers, cfg.arch.world_model.pcont.num_units, (1,),
-                              dist='binary', act='elu')
+    self.pcont = DenseDecoder(dense_input_size, cfg.arch.world_model.pcont.layers, cfg.arch.world_model.pcont.num_units, (1,),
+                              dist='binary', act='elu', aggregate_slots=True)
 
     self.r_transform = dict(
       tanh = torch.tanh,
@@ -118,10 +118,9 @@ class TransformerWorldModel(nn.Module):
     discount_acc = ((pred_pcont.mean == pcont_target.unsqueeze(2)).float().squeeze(-1) * not_pad_mask).sum(-1) / not_pad_mask.sum(-1)
     discount_acc = discount_acc.mean()
 
-    image_pred_loss = -(image_pred_pdf.log_prob(obs[:, 1:]).mean(dim=2) * not_pad_mask).sum(-1) / not_pad_mask.sum(-1)
+    image_pred_loss = (F.mse_loss(image_pred_pdf, obs[:, 1:], reduction='none').flatten(start_dim=2).mean(dim=-1) * not_pad_mask).sum(-1) / not_pad_mask.sum(-1)
     image_pred_loss = image_pred_loss.mean()
-    mse_loss = (F.mse_loss(image_pred_pdf.mean, obs[:, 1:], reduction='none').flatten(start_dim=2).mean(dim=-1) * not_pad_mask).sum(-1) / not_pad_mask.sum(-1)
-    mse_loss = mse_loss.mean()
+    mse_loss = image_pred_loss
     reward_pred_loss = -(reward_pred_pdf.log_prob(reward[:, 1:].unsqueeze(2)) * not_pad_mask).sum(-1) / not_pad_mask.sum(-1) # B
     reward_pred_loss = reward_pred_loss.mean()
     pred_reward = reward_pred_pdf.mean
@@ -628,8 +627,9 @@ class ImgDecoder(nn.Module):
 
 class DenseDecoder(nn.Module):
 
-  def __init__(self, input_size, layers, units, output_shape, weight_init='xavier', dist='normal', act='relu'):
+  def __init__(self, input_size, layers, units, output_shape, weight_init='xavier', dist='normal', act='relu', aggregate_slots=False):
     super().__init__()
+    self.aggregate_slots = aggregate_slots
 
     acts = {
       'relu': nn.ReLU,
@@ -658,6 +658,9 @@ class DenseDecoder(nn.Module):
   def forward(self, inpts):
 
     logits = self.dec(inpts)
+    if self.aggregate_slots:
+      logits = logits.sum(dim=-2)
+
     logits = logits.float()
 
     if self.dist == 'normal':
@@ -666,6 +669,9 @@ class DenseDecoder(nn.Module):
 
     elif self.dist == 'binary':
       pdf = Independent(Bernoulli(logits=logits), len(self.output_shape))
+
+    elif self.dist == 'mse':
+      return logits
 
     else:
       raise NotImplementedError(self.dist)
